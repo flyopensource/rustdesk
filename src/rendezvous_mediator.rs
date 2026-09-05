@@ -208,7 +208,11 @@ impl RendezvousMediator {
 
     pub async fn start_udp(server: ServerPtr, host: String) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
-        log::info!("start udp: {host}");
+        if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+            log::info!("start udp with provisioned server");
+        } else {
+            log::info!("start udp: {host}");
+        }
         let (mut socket, mut addr) = new_udp_for(&host, CONNECT_TIMEOUT).await?;
         let mut rz = Self {
             addr: addr.clone(),
@@ -254,7 +258,11 @@ impl RendezvousMediator {
                 }
                 if (latency - old_latency).abs() > n || old_latency <= 0 {
                     Config::update_latency(&host, latency);
-                    log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
+                    if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+                        log::debug!("Latency of provisioned server: {}ms", latency as f64 / 1000.);
+                    } else {
+                        log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
+                    }
                     old_latency = latency;
                 }
             };
@@ -438,7 +446,11 @@ impl RendezvousMediator {
                     .map(|x| x.elapsed().as_micros() as i64)
                     .unwrap_or(0);
                 Config::update_latency(&host, latency);
-                log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
+                if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+                    log::debug!("Latency of provisioned server: {}ms", latency as f64 / 1000.);
+                } else {
+                    log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
+                }
             };
             select! {
                 res = conn.next() => {
@@ -474,7 +486,11 @@ impl RendezvousMediator {
     }
 
     pub async fn start(server: ServerPtr, host: String) -> ResultType<()> {
-        log::info!("start rendezvous mediator of {}", host);
+        if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+            log::info!("start rendezvous mediator with provisioned server");
+        } else {
+            log::info!("start rendezvous mediator of {}", host);
+        }
         //If the investment agent type is http or https, then tcp forwarding is enabled.
         if (cfg!(debug_assertions) && option_env!("TEST_TCP").is_some())
             || Config::is_proxy()
@@ -818,7 +834,7 @@ impl RendezvousMediator {
     }
 
     fn get_relay_server(&self, provided_by_rendezvous_server: String) -> String {
-        let mut relay_server = Config::get_option("relay-server");
+        let mut relay_server = Config::get_effective_server_option("relay-server");
         if relay_server.is_empty() {
             relay_server = provided_by_rendezvous_server;
         }

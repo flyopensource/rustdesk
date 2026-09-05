@@ -709,7 +709,11 @@ async fn test_nat_type_() -> ResultType<bool> {
         socket.send(&msg_out).await?;
         if let Some(msg_in) = get_next_nonkeyexchange_msg(&mut socket, None).await {
             if let Some(rendezvous_message::Union::TestNatResponse(tnr)) = msg_in.union {
-                log::debug!("Got nat response from {}: port={}", server, tnr.port);
+                if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+                    log::debug!("Got nat response from provisioned server: port={}", tnr.port);
+                } else {
+                    log::debug!("Got nat response from {}: port={}", server, tnr.port);
+                }
                 if i == 0 {
                     port1 = tnr.port;
                 } else {
@@ -1105,6 +1109,16 @@ pub fn get_api_server(api: String, custom: String) -> String {
     if Config::no_register_device() {
         return "".to_owned();
     }
+    let (api, custom) = if api == Config::get_option(keys::OPTION_API_SERVER)
+        && custom == Config::get_option(keys::OPTION_CUSTOM_RENDEZVOUS_SERVER)
+    {
+        (
+            Config::get_effective_server_option(keys::OPTION_API_SERVER),
+            Config::get_effective_server_option(keys::OPTION_CUSTOM_RENDEZVOUS_SERVER),
+        )
+    } else {
+        (api, custom)
+    };
     let mut res = get_api_server_(api, custom);
     if res.ends_with('/') {
         res.pop();
@@ -1928,7 +1942,7 @@ pub async fn get_key(sync: bool) -> String {
     let mut key = Config::get_option("key");
     #[cfg(not(target_os = "ios"))]
     let mut key = if sync {
-        Config::get_option("key")
+        Config::get_effective_server_option("key")
     } else {
         let mut options = crate::ipc::get_options_async().await;
         options.remove("key").unwrap_or_default()

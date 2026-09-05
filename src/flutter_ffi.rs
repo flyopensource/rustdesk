@@ -54,6 +54,11 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Debug) // limit log level
+                .with_filter(
+                    android_logger::FilterBuilder::new()
+                        .parse("debug,reqwest=info,rustls=info")
+                        .build(),
+                )
                 .with_tag("ffi"), // logs will show under mytag tag
         );
         #[cfg(not(debug_assertions))]
@@ -1785,9 +1790,20 @@ pub fn cm_get_clients_length() -> usize {
 }
 
 pub fn main_init(app_dir: String, custom_client_config: String) {
+    #[cfg(target_os = "android")]
+    hbb_common::config::Config::set_provisioned_server_required(
+        crate::android_provisioning::is_configured(),
+    );
     initialize(&app_dir, &custom_client_config);
     #[cfg(target_os = "android")]
-    crate::hbbs_http::sync::start();
+    {
+        let id = hbb_common::config::Config::get_id();
+        let uuid = crate::encode64(hbb_common::get_uuid());
+        if let Err(error) = crate::android_provisioning::restore_cached_policy(&id, &uuid) {
+            log::warn!("Cached provisioning policy rejected: {}", error);
+        }
+        crate::hbbs_http::sync::start();
+    }
 }
 
 pub fn main_device_id(id: String) {

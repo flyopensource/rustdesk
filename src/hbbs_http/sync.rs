@@ -287,6 +287,9 @@ async fn start_hbbs_sync_async() {
                     let policy_revision = LocalConfig::get_option(crate::android_provisioning::UNATTENDED_REVISION_OPTION)
                         .parse::<i64>()
                         .unwrap_or(0);
+                    let provisioning_revision = LocalConfig::get_option(crate::android_provisioning::POLICY_REVISION_OPTION)
+                        .parse::<i64>()
+                        .unwrap_or(policy_revision);
                     v["unattended_status"] = json!({
                         "policy_revision": policy_revision,
                         "status": LocalConfig::get_option("android-unattended-status"),
@@ -296,6 +299,11 @@ async fn start_hbbs_sync_async() {
                         "accessibility_ready": LocalConfig::get_option("android-unattended-accessibility-ready") == "Y",
                         "service_running": LocalConfig::get_option("android-unattended-service-running") == "Y",
                         "last_error": LocalConfig::get_option("android-unattended-last-error"),
+                    });
+                    v["server_profile_status"] = json!({
+                        "policy_revision": provisioning_revision,
+                        "active_source": crate::android_provisioning::server_profile_source(),
+                        "connected": hbb_common::config::get_online_state() > 0,
                     });
                 }
                 #[cfg(target_os = "android")]

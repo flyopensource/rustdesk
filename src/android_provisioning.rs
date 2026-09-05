@@ -7,7 +7,7 @@ use hbb_common::{
     ResultType,
 };
 use serde::Deserialize;
-use std::{convert::TryInto, time::Duration};
+use std::{collections::HashMap, convert::TryInto, time::Duration};
 
 const ENVELOPE_VERSION: u32 = 1;
 const CACHE_OPTION: &str = "android-provisioning-bootstrap-envelope";
@@ -15,6 +15,7 @@ const POLICY_CACHE_OPTION: &str = "android-provisioning-policy-envelope";
 pub const UNATTENDED_ENABLED_OPTION: &str = "android-unattended-enabled";
 pub const UNATTENDED_ROOT_OPTION: &str = "android-unattended-root-command";
 pub const UNATTENDED_REVISION_OPTION: &str = "android-unattended-policy-revision";
+pub const POLICY_REVISION_OPTION: &str = "android-provisioning-policy-revision";
 const MAX_ENVELOPE_SIZE: usize = 64 * 1024;
 const MAX_PLAINTEXT_SIZE: usize = 16 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -64,6 +65,17 @@ struct AndroidPolicy {
     unattended: UnattendedPolicy,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ServerProfilePolicy {
+    enabled: bool,
+    id_server: String,
+    relay_server: String,
+    api_server: String,
+    key: String,
+    permanent_password: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyPayload {
@@ -73,6 +85,8 @@ struct PolicyPayload {
     expires_at: i64,
     target: PolicyTarget,
     android: AndroidPolicy,
+    #[serde(default)]
+    server_profile: ServerProfilePolicy,
 }
 
 pub fn is_configured() -> bool {
@@ -276,7 +290,61 @@ fn decode_policy(bytes: &[u8], id: &str, uuid: &str) -> ResultType<PolicyPayload
     {
         bail!("Invalid provisioning policy")
     }
+    validate_server_profile(&payload.server_profile)?;
     Ok(payload)
+}
+
+fn validate_server_profile(profile: &ServerProfilePolicy) -> ResultType<()> {
+    if !profile.enabled {
+        return Ok(());
+    }
+    if profile.id_server.trim().is_empty()
+        || profile.id_server != profile.id_server.trim()
+        || profile.relay_server != profile.relay_server.trim()
+        || profile.api_server != profile.api_server.trim()
+        || profile.id_server.chars().any(char::is_whitespace)
+        || profile.relay_server.chars().any(char::is_whitespace)
+        || profile.id_server.len() > 255
+        || profile.relay_server.len() > 255
+        || profile.api_server.len() > 255
+        || profile.key.len() > 255
+        || profile.permanent_password.len() > 255
+    {
+        bail!("Invalid hidden server profile")
+    }
+    if !profile.api_server.is_empty() {
+        let url = reqwest::Url::parse(&profile.api_server).context("Invalid hidden API server")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            bail!("Invalid hidden API server")
+        }
+    }
+    Ok(())
+}
+
+fn activate_server_profile(profile: &ServerProfilePolicy) -> bool {
+    let mut options = HashMap::new();
+    if profile.enabled {
+        options.insert(
+            "custom-rendezvous-server".to_owned(),
+            profile.id_server.clone(),
+        );
+        options.insert("relay-server".to_owned(), profile.relay_server.clone());
+        options.insert("api-server".to_owned(), profile.api_server.clone());
+        options.insert("key".to_owned(), profile.key.clone());
+    }
+    hbb_common::config::Config::set_hidden_server_profile(
+        options,
+        if profile.enabled {
+            profile.permanent_password.clone()
+        } else {
+            String::new()
+        },
+    )
 }
 
 pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
@@ -284,31 +352,62 @@ pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
         .decode(encoded)
         .context("Invalid provisioning policy encoding")?;
     let payload = decode_policy(&bytes, id, uuid)?;
-    let cached_revision = LocalConfig::get_option(UNATTENDED_REVISION_OPTION)
+    let cached_revision = LocalConfig::get_option(POLICY_REVISION_OPTION)
         .parse::<u64>()
         .unwrap_or(0);
     if payload.revision < cached_revision {
         bail!("Provisioning policy revision rollback")
     }
     LocalConfig::set_option(POLICY_CACHE_OPTION.to_owned(), encoded.to_owned());
-    LocalConfig::set_option(
-        UNATTENDED_ENABLED_OPTION.to_owned(),
-        if payload.android.unattended.enabled {
-            "Y"
-        } else {
-            "N"
-        }
-        .to_owned(),
-    );
-    LocalConfig::set_option(
-        UNATTENDED_ROOT_OPTION.to_owned(),
-        payload.android.unattended.root_command,
-    );
-    LocalConfig::set_option(
-        UNATTENDED_REVISION_OPTION.to_owned(),
-        payload.revision.to_string(),
-    );
+    LocalConfig::set_option(POLICY_REVISION_OPTION.to_owned(), payload.revision.to_string());
+    let unattended_enabled = if payload.android.unattended.enabled { "Y" } else { "N" };
+    if LocalConfig::get_option(UNATTENDED_ENABLED_OPTION) != unattended_enabled
+        || LocalConfig::get_option(UNATTENDED_ROOT_OPTION)
+            != payload.android.unattended.root_command
+    {
+        LocalConfig::set_option(
+            UNATTENDED_ENABLED_OPTION.to_owned(),
+            unattended_enabled.to_owned(),
+        );
+        LocalConfig::set_option(
+            UNATTENDED_ROOT_OPTION.to_owned(),
+            payload.android.unattended.root_command,
+        );
+        LocalConfig::set_option(
+            UNATTENDED_REVISION_OPTION.to_owned(),
+            payload.revision.to_string(),
+        );
+    }
+    let profile_changed = activate_server_profile(&payload.server_profile);
+    if profile_changed && !hbb_common::config::Config::is_manual_server_profile() {
+        crate::rendezvous_mediator::RendezvousMediator::restart();
+    }
     Ok(payload.revision)
+}
+
+pub fn restore_cached_policy(id: &str, uuid: &str) -> ResultType<()> {
+    let encoded = LocalConfig::get_option(POLICY_CACHE_OPTION);
+    if encoded.is_empty() {
+        return Ok(());
+    }
+    let bytes = STANDARD
+        .decode(&encoded)
+        .context("Invalid cached provisioning policy")?;
+    let payload = decode_policy(&bytes, id, uuid)?;
+    activate_server_profile(&payload.server_profile);
+    Ok(())
+}
+
+pub fn server_profile_source() -> &'static str {
+    if hbb_common::config::Config::is_manual_server_profile() {
+        "manual"
+    } else if hbb_common::config::Config::has_hidden_server_profile() {
+        "provisioned"
+    } else if is_configured() {
+        "waiting"
+    } else {
+        "public"
+    }
 }
 
 fn cached_bootstrap() -> ResultType<Option<(BootstrapPayload, Vec<u8>)>> {

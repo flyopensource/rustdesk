@@ -283,6 +283,22 @@ async fn start_hbbs_sync_async() {
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
                 #[cfg(target_os = "android")]
+                if requires_device_auth {
+                    let policy_revision = LocalConfig::get_option(crate::android_provisioning::UNATTENDED_REVISION_OPTION)
+                        .parse::<i64>()
+                        .unwrap_or(0);
+                    v["unattended_status"] = json!({
+                        "policy_revision": policy_revision,
+                        "status": LocalConfig::get_option("android-unattended-status"),
+                        "root_executor": LocalConfig::get_option("android-unattended-root-executor"),
+                        "root_available": LocalConfig::get_option("android-unattended-root-available") == "Y",
+                        "screen_capture_ready": LocalConfig::get_option("android-unattended-screen-capture-ready") == "Y",
+                        "accessibility_ready": LocalConfig::get_option("android-unattended-accessibility-ready") == "Y",
+                        "service_running": LocalConfig::get_option("android-unattended-service-running") == "Y",
+                        "last_error": LocalConfig::get_option("android-unattended-last-error"),
+                    });
+                }
+                #[cfg(target_os = "android")]
                 let heartbeat_response = if requires_device_auth {
                     let Some(state) = device_auth.as_mut() else {
                         continue;
@@ -320,17 +336,32 @@ async fn start_hbbs_sync_async() {
                                     SENDER.lock().unwrap().send(conns).ok();
                                 }
                         }
-                        if let Some(rsp_modified_at) = rsp.remove("modified_at") {
-                            if let Ok(rsp_modified_at) = serde_json::from_value::<i64>(rsp_modified_at) {
-                                if rsp_modified_at != modified_at {
-                                    LocalConfig::set_option("strategy_timestamp".to_string(), rsp_modified_at.to_string());
-                                }
-                            }
-                        }
+                        let rsp_modified_at = rsp.remove("modified_at")
+                            .and_then(|value| serde_json::from_value::<i64>(value).ok());
+                        let mut policy_applied = false;
                         if let Some(strategy) = rsp.remove("strategy") {
-                            if let Ok(strategy) = serde_json::from_value::<StrategyOptions>(strategy) {
+                            if let Ok(mut strategy) = serde_json::from_value::<StrategyOptions>(strategy) {
+                                #[cfg(target_os = "android")]
+                                if requires_device_auth {
+                                    if let Some(envelope) = strategy.extra.remove("android_provisioning") {
+                                        let uuid = crate::encode64(hbb_common::get_uuid());
+                                        match crate::android_provisioning::apply_policy(&envelope, &id, &uuid) {
+                                            Ok(_) => policy_applied = true,
+                                            Err(error) => log::warn!("Provisioning policy rejected: {}", error),
+                                        }
+                                    }
+                                }
                                 log::info!("strategy updated");
                                 handle_config_options(strategy.config_options);
+                            }
+                        }
+                        if let Some(revision) = rsp_modified_at {
+                            #[cfg(target_os = "android")]
+                            let can_store_revision = !requires_device_auth || revision == modified_at || policy_applied;
+                            #[cfg(not(target_os = "android"))]
+                            let can_store_revision = true;
+                            if can_store_revision && revision != modified_at {
+                                LocalConfig::set_option("strategy_timestamp".to_string(), revision.to_string());
                             }
                         }
                     }
@@ -689,10 +720,7 @@ mod tests {
         let verifier = switch_code_verifier(switch_code);
         assert_ne!(verifier, switch_code);
         assert_eq!(verifier, switch_code_verifier(switch_code));
-        assert_eq!(
-            verifier,
-            "dMIn3uiPe77XodFB5IKi7PrKJ7l7+zVquNn0ObSaHQc="
-        );
+        assert_eq!(verifier, "dMIn3uiPe77XodFB5IKi7PrKJ7l7+zVquNn0ObSaHQc=");
     }
 
     #[test]

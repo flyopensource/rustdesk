@@ -42,6 +42,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
+private data class RootResult(val ok: Boolean, val output: String)
+
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -74,6 +76,79 @@ class MainActivity : FlutterActivity() {
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
+
+    private fun runRoot(executor: String, command: String): RootResult {
+        if (executor != "su" && executor != "testsu") return RootResult(false, "")
+        val process = try {
+            ProcessBuilder(executor, "-c", command).redirectErrorStream(true).start()
+        } catch (_: Exception) {
+            return RootResult(false, "")
+        }
+        val deadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val code = process.exitValue()
+                val output = process.inputStream.bufferedReader().readText().trim()
+                return RootResult(code == 0, output)
+            } catch (_: IllegalThreadStateException) {
+                Thread.sleep(50)
+            }
+        }
+        process.destroy()
+        return RootResult(false, "")
+    }
+
+    private fun applyUnattended(requested: String): Map<String, Any> {
+        if (requested == "disabled") {
+            getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+                .edit().putBoolean(KEY_START_ON_BOOT_OPT, false).apply()
+            return mapOf(
+                "status" to "disabled", "root_executor" to "",
+                "root_available" to false, "accessibility_ready" to InputService.isOpen,
+                "last_error" to ""
+            )
+        }
+        val candidates = when (requested) {
+            "su" -> listOf("su")
+            "testsu" -> listOf("testsu")
+            "auto" -> listOf("su", "testsu")
+            else -> emptyList()
+        }
+        val executor = candidates.firstOrNull { runRoot(it, "id -u").let { result -> result.ok && result.output == "0" } }
+            ?: return mapOf(
+                "status" to "pending_user_action", "root_executor" to "",
+                "root_available" to false, "accessibility_ready" to InputService.isOpen,
+                "last_error" to "root_unavailable"
+            )
+        val component = "$packageName/$packageName.InputService"
+        val current = runRoot(executor, "settings get secure enabled_accessibility_services")
+        if (!current.ok) {
+            return mapOf("status" to "failed", "root_executor" to executor, "root_available" to true,
+                "accessibility_ready" to false, "last_error" to "accessibility_read_failed")
+        }
+        val existing = current.output.takeUnless { it == "null" } ?: ""
+        if (!existing.matches(Regex("[A-Za-z0-9_./:$-]*"))) {
+            return mapOf("status" to "failed", "root_executor" to executor, "root_available" to true,
+                "accessibility_ready" to false, "last_error" to "accessibility_value_invalid")
+        }
+        val services = existing.split(':').filter { it.isNotEmpty() }.toMutableList()
+        if (!services.contains(component)) services.add(component)
+        val accessibilitySet = runRoot(executor,
+            "settings put secure enabled_accessibility_services ${services.joinToString(":")} && settings put secure accessibility_enabled 1")
+        val projectionSet = runRoot(executor, "appops set $packageName PROJECT_MEDIA allow")
+        val bootSet = runRoot(executor,
+            "appops set $packageName SYSTEM_ALERT_WINDOW allow && dumpsys deviceidle whitelist +$packageName")
+        getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+            .edit().putBoolean(KEY_START_ON_BOOT_OPT, true).apply()
+        val ok = accessibilitySet.ok && projectionSet.ok && bootSet.ok
+        return mapOf(
+            "status" to if (ok) "success" else "partial",
+            "root_executor" to executor, "root_available" to true,
+            "accessibility_ready" to InputService.isOpen,
+            "last_error" to if (ok) "" else if (!accessibilitySet.ok) "accessibility_enable_failed"
+                else if (!projectionSet.ok) "screen_capture_grant_failed" else "boot_permission_grant_failed"
+        )
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -276,6 +351,13 @@ class MainActivity : FlutterActivity() {
                     }
                     requestMediaProjection()
                     result.success(true)
+                }
+                "apply_unattended" -> {
+                    val requested = call.arguments as? String ?: "disabled"
+                    thread {
+                        val value = applyUnattended(requested)
+                        runOnUiThread { result.success(value) }
+                    }
                 }
                 "start_capture" -> {
                     mainService?.let {

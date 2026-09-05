@@ -23,6 +23,10 @@ const kUseTemporaryPassword = "use-temporary-password";
 const kUsePermanentPassword = "use-permanent-password";
 const kUseBothPasswords = "use-both-passwords";
 
+bool get androidUnattendedEnabled =>
+    isAndroid &&
+    bind.mainGetLocalOption(key: 'android-unattended-enabled') == 'Y';
+
 class ServerModel with ChangeNotifier {
   bool _isStart = false; // Android MainService status
   bool _mediaOk = false;
@@ -38,6 +42,8 @@ class ServerModel with ChangeNotifier {
   bool _allowNumericOneTimePassword = false;
   String _approveMode = "";
   int _zeroClientLengthCounter = 0;
+  bool _applyingUnattended = false;
+  String _unattendedAttemptedRevision = '';
 
   late String _emptyIdShow;
   late final IDTextEditingController _serverId;
@@ -176,6 +182,53 @@ class ServerModel with ChangeNotifier {
       }
 
       updatePasswordModel();
+
+      final unattendedRevision =
+          bind.mainGetLocalOption(key: 'android-unattended-policy-revision');
+      if (!_applyingUnattended &&
+          parent.target != null &&
+          unattendedRevision != _unattendedAttemptedRevision) {
+        _applyingUnattended = true;
+        _unattendedAttemptedRevision = unattendedRevision;
+        try {
+          final result = await parent.target
+              ?.invokeMethodWithResult<Map<dynamic, dynamic>>(
+                  'apply_unattended',
+                  androidUnattendedEnabled
+                      ? bind.mainGetLocalOption(
+                          key: 'android-unattended-root-command')
+                      : 'disabled');
+          if (result is Map) {
+            final unattendedResult = Map<dynamic, dynamic>.from(result);
+            bind.mainSetLocalOption(
+                key: 'android-unattended-status',
+                value: '${unattendedResult['status'] ?? 'failed'}');
+            bind.mainSetLocalOption(
+                key: 'android-unattended-root-executor',
+                value: '${unattendedResult['root_executor'] ?? ''}');
+            bind.mainSetLocalOption(
+                key: 'android-unattended-root-available',
+                value: unattendedResult['root_available'] == true ? 'Y' : 'N');
+            bind.mainSetLocalOption(
+                key: 'android-unattended-accessibility-ready',
+                value: unattendedResult['accessibility_ready'] == true
+                    ? 'Y'
+                    : 'N');
+            bind.mainSetLocalOption(
+                key: 'android-unattended-last-error',
+                value: '${unattendedResult['last_error'] ?? ''}');
+            bind.mainSetLocalOption(
+                key: 'android-unattended-policy-revision-applied',
+                value: unattendedRevision);
+            if (androidUnattendedEnabled &&
+                unattendedResult['root_available'] == true) {
+              await startService();
+            }
+          }
+        } finally {
+          _applyingUnattended = false;
+        }
+      }
     }
 
     if (!isTest) {
@@ -340,7 +393,9 @@ class ServerModel with ChangeNotifier {
       if (parent.target != null) {
         /// the result of toggle-on depends on user actions in the settings page.
         /// handle result, see [ServerModel.changeStatue]
-        showInputWarnAlert(parent.target!);
+        if (!androidUnattendedEnabled) {
+          showInputWarnAlert(parent.target!);
+        }
       }
     }
   }
@@ -403,25 +458,27 @@ class ServerModel with ChangeNotifier {
       if (bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) != 'Y') {
         await checkFloatingWindowPermission();
       }
-      final res = await parent.target?.dialogManager
-          .show<bool>((setState, close, context) {
-        submit() => close(true);
-        return CustomAlertDialog(
-          title: Row(children: [
-            const Icon(Icons.warning_amber_sharp,
-                color: Colors.redAccent, size: 28),
-            const SizedBox(width: 10),
-            Text(translate("Warning")),
-          ]),
-          content: Text(translate("android_service_will_start_tip")),
-          actions: [
-            dialogButton("Cancel", onPressed: close, isOutline: true),
-            dialogButton("OK", onPressed: submit),
-          ],
-          onSubmit: submit,
-          onCancel: close,
-        );
-      });
+      final res = androidUnattendedEnabled
+          ? true
+          : await parent.target?.dialogManager
+              .show<bool>((setState, close, context) {
+              submit() => close(true);
+              return CustomAlertDialog(
+                title: Row(children: [
+                  const Icon(Icons.warning_amber_sharp,
+                      color: Colors.redAccent, size: 28),
+                  const SizedBox(width: 10),
+                  Text(translate("Warning")),
+                ]),
+                content: Text(translate("android_service_will_start_tip")),
+                actions: [
+                  dialogButton("Cancel", onPressed: close, isOutline: true),
+                  dialogButton("OK", onPressed: submit),
+                ],
+                onSubmit: submit,
+                onCancel: close,
+              );
+            });
       if (res == true) {
         startService();
       }
@@ -466,6 +523,14 @@ class ServerModel with ChangeNotifier {
     switch (name) {
       case "media":
         _mediaOk = value;
+        if (androidUnattendedEnabled) {
+          bind.mainSetLocalOption(
+              key: 'android-unattended-screen-capture-ready',
+              value: value ? 'Y' : 'N');
+          bind.mainSetLocalOption(
+              key: 'android-unattended-service-running',
+              value: value ? 'Y' : 'N');
+        }
         if (value && !_isStart) {
           startService();
         }
@@ -477,6 +542,11 @@ class ServerModel with ChangeNotifier {
               value: value ? defaultOptionYes : 'N');
         }
         _inputOk = value;
+        if (androidUnattendedEnabled) {
+          bind.mainSetLocalOption(
+              key: 'android-unattended-accessibility-ready',
+              value: value ? 'Y' : 'N');
+        }
         break;
       default:
         return;

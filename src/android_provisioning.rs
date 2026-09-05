@@ -11,6 +11,10 @@ use std::{convert::TryInto, time::Duration};
 
 const ENVELOPE_VERSION: u32 = 1;
 const CACHE_OPTION: &str = "android-provisioning-bootstrap-envelope";
+const POLICY_CACHE_OPTION: &str = "android-provisioning-policy-envelope";
+pub const UNATTENDED_ENABLED_OPTION: &str = "android-unattended-enabled";
+pub const UNATTENDED_ROOT_OPTION: &str = "android-unattended-root-command";
+pub const UNATTENDED_REVISION_OPTION: &str = "android-unattended-policy-revision";
 const MAX_ENVELOPE_SIZE: usize = 64 * 1024;
 const MAX_PLAINTEXT_SIZE: usize = 16 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -38,6 +42,37 @@ struct BootstrapPayload {
     issued_at: i64,
     expires_at: i64,
     provisioning_api_server: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyTarget {
+    rustdesk_id: String,
+    uuid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnattendedPolicy {
+    enabled: bool,
+    root_command: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AndroidPolicy {
+    unattended: UnattendedPolicy,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyPayload {
+    version: u32,
+    revision: u64,
+    issued_at: i64,
+    expires_at: i64,
+    target: PolicyTarget,
+    android: AndroidPolicy,
 }
 
 pub fn is_configured() -> bool {
@@ -174,6 +209,106 @@ fn decode_bootstrap(bytes: &[u8]) -> ResultType<BootstrapPayload> {
     }
     payload.provisioning_api_server = validate_server_url(&payload.provisioning_api_server)?;
     Ok(payload)
+}
+
+fn decode_policy(bytes: &[u8], id: &str, uuid: &str) -> ResultType<PolicyPayload> {
+    if bytes.is_empty() || bytes.len() > 256 * 1024 {
+        bail!("Invalid provisioning policy size")
+    }
+    let envelope: ProvisionEnvelope =
+        serde_json::from_slice(bytes).context("Invalid provisioning policy envelope")?;
+    if envelope.version != ENVELOPE_VERSION
+        || envelope.purpose != "policy"
+        || envelope.key_id != configured_key_id()
+    {
+        bail!("Unsupported provisioning policy envelope")
+    }
+    let nonce = decode_fixed::<{ secretbox::NONCEBYTES }>(&envelope.nonce, "policy nonce")?;
+    let ciphertext = STANDARD
+        .decode(&envelope.ciphertext)
+        .context("Failed to decode provisioning policy ciphertext")?;
+    let signature =
+        decode_fixed::<{ sign::SIGNATUREBYTES }>(&envelope.signature, "policy signature")?;
+    let public_key = decode_fixed::<{ sign::PUBLICKEYBYTES }>(
+        option_env!("RUD_CFG_VERIFY_PUBLIC_KEY_B64")
+            .map(str::trim)
+            .unwrap_or_default(),
+        "verify public key",
+    )?;
+    let message = signature_message(
+        envelope.version,
+        &envelope.purpose,
+        &envelope.key_id,
+        &nonce,
+        &ciphertext,
+    );
+    let signature = sign::Signature::from_bytes(&signature)
+        .map_err(|_| anyhow!("Invalid provisioning policy signature"))?;
+    if !sign::verify_detached(&signature, &message, &sign::PublicKey(public_key)) {
+        bail!("Provisioning policy signature mismatch")
+    }
+    let secret_key = decode_fixed::<{ secretbox::KEYBYTES }>(
+        option_env!("RUD_CFG_SECRETBOX_KEY_B64")
+            .map(str::trim)
+            .unwrap_or_default(),
+        "SecretBox key",
+    )?;
+    let plaintext = secretbox::open(
+        &ciphertext,
+        &secretbox::Nonce(nonce),
+        &secretbox::Key(secret_key),
+    )
+    .map_err(|_| anyhow!("Provisioning policy decryption failed"))?;
+    let payload: PolicyPayload =
+        serde_json::from_slice(&plaintext).context("Invalid provisioning policy payload")?;
+    let now = hbb_common::get_time() / 1000;
+    if payload.version != ENVELOPE_VERSION
+        || payload.revision == 0
+        || payload.issued_at > now + 300
+        || payload.expires_at <= now
+        || payload.expires_at <= payload.issued_at
+        || payload.target.rustdesk_id != id
+        || payload.target.uuid != uuid
+        || !matches!(
+            payload.android.unattended.root_command.as_str(),
+            "auto" | "su" | "testsu" | "disabled"
+        )
+    {
+        bail!("Invalid provisioning policy")
+    }
+    Ok(payload)
+}
+
+pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
+    let bytes = STANDARD
+        .decode(encoded)
+        .context("Invalid provisioning policy encoding")?;
+    let payload = decode_policy(&bytes, id, uuid)?;
+    let cached_revision = LocalConfig::get_option(UNATTENDED_REVISION_OPTION)
+        .parse::<u64>()
+        .unwrap_or(0);
+    if payload.revision < cached_revision {
+        bail!("Provisioning policy revision rollback")
+    }
+    LocalConfig::set_option(POLICY_CACHE_OPTION.to_owned(), encoded.to_owned());
+    LocalConfig::set_option(
+        UNATTENDED_ENABLED_OPTION.to_owned(),
+        if payload.android.unattended.enabled {
+            "Y"
+        } else {
+            "N"
+        }
+        .to_owned(),
+    );
+    LocalConfig::set_option(
+        UNATTENDED_ROOT_OPTION.to_owned(),
+        payload.android.unattended.root_command,
+    );
+    LocalConfig::set_option(
+        UNATTENDED_REVISION_OPTION.to_owned(),
+        payload.revision.to_string(),
+    );
+    Ok(payload.revision)
 }
 
 fn cached_bootstrap() -> ResultType<Option<(BootstrapPayload, Vec<u8>)>> {

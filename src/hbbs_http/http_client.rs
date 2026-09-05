@@ -111,6 +111,15 @@ pub fn create_http_client_async(
     configure_http_client!(builder, tls_type, danger_accept_invalid_cert, AsyncClient)
 }
 
+#[cfg(target_os = "android")]
+pub fn create_http_client_async_no_redirect(
+    tls_type: TlsType,
+    danger_accept_invalid_cert: bool,
+) -> AsyncClient {
+    let builder = AsyncClient::builder().redirect(reqwest::redirect::Policy::none());
+    configure_http_client!(builder, tls_type, danger_accept_invalid_cert, AsyncClient)
+}
+
 pub fn get_url_for_tls<'a>(url: &'a str, proxy_conf: &'a Option<Socks5Server>) -> &'a str {
     if is_plain(url) {
         if let Some(conf) = proxy_conf {

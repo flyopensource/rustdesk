@@ -9,6 +9,13 @@ on:
       upload-tag:
         type: string
         default: "nightly"
+    secrets:
+      RUD_CFG_URL:
+        required: false
+      RUD_CFG_SECRETBOX_KEY_B64:
+        required: false
+      RUD_DEVICE_ENROLLMENT_KEY_B64:
+        required: false
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -1171,7 +1178,22 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          RUD_CFG_URL: ${{ secrets.RUD_CFG_URL }}
+          RUD_CFG_SECRETBOX_KEY_B64: ${{ secrets.RUD_CFG_SECRETBOX_KEY_B64 }}
+          RUD_CFG_VERIFY_PUBLIC_KEY_B64: ${{ vars.RUD_CFG_VERIFY_PUBLIC_KEY_B64 }}
+          RUD_CFG_KEY_ID: ${{ vars.RUD_CFG_KEY_ID }}
+          RUD_DEVICE_ENROLLMENT_KEY_B64: ${{ secrets.RUD_DEVICE_ENROLLMENT_KEY_B64 }}
         run: |
+          configured=0
+          for value in RUD_CFG_URL RUD_CFG_SECRETBOX_KEY_B64 RUD_CFG_VERIFY_PUBLIC_KEY_B64 RUD_DEVICE_ENROLLMENT_KEY_B64; do
+            if [[ -n "${!value}" ]]; then
+              configured=$((configured + 1))
+            fi
+          done
+          if [[ "${configured}" -ne 0 && "${configured}" -ne 4 ]]; then
+            echo "Android provisioning variables must be configured together" >&2
+            exit 1
+          fi
           rustup target add ${{ matrix.job.target }}
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           case ${{ matrix.job.target }} in

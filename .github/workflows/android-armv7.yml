@@ -1,0 +1,227 @@
+name: Build Android ARMv7 release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: APK version label
+        required: true
+        default: "1.5.0"
+        type: string
+      publish-release:
+        description: Publish the signed APK to a GitHub Release
+        required: true
+        default: false
+        type: boolean
+      release-tag:
+        description: Release tag used when publishing
+        required: true
+        default: "android-armv7"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RUST_VERSION: "1.75"
+  CARGO_NDK_VERSION: "3.1.2"
+  ANDROID_FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r28c"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  TARGET: armv7-linux-androideabi
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+    with:
+      default-only: true
+
+  build-armv7:
+    name: Build and sign armeabi-v7a APK
+    needs: generate-bridge
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Export GitHub Actions cache environment
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake curl gcc-multilib git g++ g++-multilib \
+            libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev \
+            llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config wget
+
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Validate signing and provisioning configuration
+        env:
+          VERSION_LABEL: ${{ inputs.version }}
+          ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+          ANDROID_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          ANDROID_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          RUD_CFG_URL: ${{ secrets.RUD_CFG_URL }}
+          RUD_CFG_SECRETBOX_KEY_B64: ${{ secrets.RUD_CFG_SECRETBOX_KEY_B64 }}
+          RUD_CFG_VERIFY_PUBLIC_KEY_B64: ${{ vars.RUD_CFG_VERIFY_PUBLIC_KEY_B64 }}
+          RUD_DEVICE_ENROLLMENT_KEY_B64: ${{ secrets.RUD_DEVICE_ENROLLMENT_KEY_B64 }}
+        run: |
+          if [[ ! "${VERSION_LABEL}" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "Version label may contain only letters, numbers, dots, underscores, and hyphens" >&2
+            exit 1
+          fi
+          for name in \
+            ANDROID_SIGNING_KEY ANDROID_ALIAS ANDROID_KEY_STORE_PASSWORD ANDROID_KEY_PASSWORD \
+            RUD_CFG_URL RUD_CFG_SECRETBOX_KEY_B64 RUD_CFG_VERIFY_PUBLIC_KEY_B64 \
+            RUD_DEVICE_ENROLLMENT_KEY_B64; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required GitHub Secret or Variable: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
+
+      - name: Patch Flutter
+        run: |
+          cd "$(dirname "$(dirname "$(which flutter)")")"
+          git apply "${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Setup vcpkg cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Build ARMv7 dependencies
+        run: ./flutter/build_android_deps.sh armeabi-v7a
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: rustdesk-lib-cache-android-armv7
+          key: ${{ env.TARGET }}
+
+      - name: Build ARMv7 Rust library
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          RUD_CFG_URL: ${{ secrets.RUD_CFG_URL }}
+          RUD_CFG_SECRETBOX_KEY_B64: ${{ secrets.RUD_CFG_SECRETBOX_KEY_B64 }}
+          RUD_CFG_VERIFY_PUBLIC_KEY_B64: ${{ vars.RUD_CFG_VERIFY_PUBLIC_KEY_B64 }}
+          RUD_CFG_KEY_ID: ${{ vars.RUD_CFG_KEY_ID }}
+          RUD_DEVICE_ENROLLMENT_KEY_B64: ${{ secrets.RUD_DEVICE_ENROLLMENT_KEY_B64 }}
+        run: |
+          rustup target add "${TARGET}"
+          cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked
+          ./flutter/ndk_arm.sh
+          mkdir -p flutter/android/app/src/main/jniLibs/armeabi-v7a
+          cp "target/${TARGET}/release/liblibrustdesk.so" \
+            flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+
+      - name: Build ARMv7 release APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          VERSION_LABEL: ${{ inputs.version }}
+        run: |
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          sed -i 's/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g' flutter/android/gradle.properties
+          sed -i 's/signingConfigs.release/signingConfigs.debug/g' flutter/android/app/build.gradle
+          cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so" \
+            flutter/android/app/src/main/jniLibs/armeabi-v7a/
+          pushd flutter
+          flutter build apk --release --target-platform android-arm --split-per-abi
+          popd
+          mkdir -p signed-apk
+          mv flutter/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
+            "signed-apk/rustdesk-${VERSION_LABEL}-armv7.apk"
+
+      - name: Select Android build tools
+        run: |
+          BUILD_TOOLS_VERSION=$(find /usr/local/lib/android/sdk/build-tools -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)
+          echo "BUILD_TOOLS_VERSION=${BUILD_TOOLS_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Sign APK
+        uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
+        id: sign-apk
+        with:
+          releaseDirectory: signed-apk
+          signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          alias: ${{ secrets.ANDROID_ALIAS }}
+          keyStorePassword: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        env:
+          BUILD_TOOLS_VERSION: ${{ env.BUILD_TOOLS_VERSION }}
+
+      - name: Verify signed APK and write checksum
+        env:
+          SIGNED_APK: ${{ steps.sign-apk.outputs.signedReleaseFile }}
+        run: |
+          "/usr/local/lib/android/sdk/build-tools/${BUILD_TOOLS_VERSION}/apksigner" verify \
+            --verbose --print-certs "${SIGNED_APK}"
+          sha256sum "${SIGNED_APK}" > "${SIGNED_APK}.sha256"
+
+      - name: Upload signed ARMv7 APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-${{ inputs.version }}-armv7-signed
+          path: |
+            ${{ steps.sign-apk.outputs.signedReleaseFile }}
+            ${{ steps.sign-apk.outputs.signedReleaseFile }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish-release }}
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ inputs.release-tag }}
+          files: |
+            ${{ steps.sign-apk.outputs.signedReleaseFile }}
+            ${{ steps.sign-apk.outputs.signedReleaseFile }}.sha256

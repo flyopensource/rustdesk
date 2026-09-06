@@ -1,0 +1,22 @@
+name: Desktop x86_64 Build (Windows + Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Release tag used to publish the build outputs
+        required: true
+        default: desktop-x86_64
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ${{ inputs.release-tag }}
+      desktop-x86_64-only: true

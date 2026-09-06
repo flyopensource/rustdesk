@@ -63,3 +63,7 @@ flutter/web/
 /rud.cfg
 /rud-keys.json
 /rud-bootstrap.json
+
+# Private planning and local release documentation
+/docs/android-provisioning-rewrite-requirements.md
+/flutter/build_android_local_release.md

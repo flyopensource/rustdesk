@@ -414,34 +414,58 @@ APKSIGNER="$(find_android_tool apksigner)"
 AAPT="$(find_android_tool aapt)"
 prepare_flutter_sources
 
-build_android_target arm64-v8a aarch64-linux-android aarch64-linux-android
-build_android_target armeabi-v7a armv7-linux-androideabi arm-linux-androideabi
+BUILD_ANDROID_ARM64="${BUILD_ANDROID_ARM64:-1}"
+BUILD_ANDROID_ARMV7="${BUILD_ANDROID_ARMV7:-1}"
+if [[ "${BUILD_ANDROID_ARM64}" != "0" && "${BUILD_ANDROID_ARM64}" != "1" ]] || \
+    [[ "${BUILD_ANDROID_ARMV7}" != "0" && "${BUILD_ANDROID_ARMV7}" != "1" ]]; then
+    echo "ERROR: BUILD_ANDROID_ARM64 and BUILD_ANDROID_ARMV7 must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "${BUILD_ANDROID_ARM64}" == "0" && "${BUILD_ANDROID_ARMV7}" == "0" ]]; then
+    echo "ERROR: at least one Android ABI must be enabled" >&2
+    exit 1
+fi
+
+TARGET_PLATFORMS=()
+if [[ "${BUILD_ANDROID_ARM64}" == "1" ]]; then
+    build_android_target arm64-v8a aarch64-linux-android aarch64-linux-android
+    TARGET_PLATFORMS+=(android-arm64)
+fi
+if [[ "${BUILD_ANDROID_ARMV7}" == "1" ]]; then
+    build_android_target armeabi-v7a armv7-linux-androideabi arm-linux-androideabi
+    TARGET_PLATFORMS+=(android-arm)
+fi
+TARGET_PLATFORM="$(IFS=,; echo "${TARGET_PLATFORMS[*]}")"
 
 install -d "${OUTPUT_DIR}" "${SYMBOL_DIR}"
 (
     cd "${SCRIPT_DIR}"
     flutter build apk --release --split-per-abi \
-        --target-platform android-arm64,android-arm \
+        --target-platform "${TARGET_PLATFORM}" \
         --obfuscate --split-debug-info "${SYMBOL_DIR}"
 )
 
 VERSION="$(awk '/^version:/ { print $2; exit }' "${SCRIPT_DIR}/pubspec.yaml")"
 VERSION="${VERSION%%+*}"
-ARM64_SOURCE="${SCRIPT_DIR}/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
-ARMV7_SOURCE="${SCRIPT_DIR}/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk"
-ARM64_APK="${OUTPUT_DIR}/rustdesk-${VERSION}-arm64-v8a-signed.apk"
-ARMV7_APK="${OUTPUT_DIR}/rustdesk-${VERSION}-armeabi-v7a-signed.apk"
-
-install -m 0644 "${ARM64_SOURCE}" "${ARM64_APK}"
-install -m 0644 "${ARMV7_SOURCE}" "${ARMV7_APK}"
-
-validate_apk "${ARM64_APK}" arm64-v8a "${ARM64_APK%.apk}.txt"
-validate_apk "${ARMV7_APK}" armeabi-v7a "${ARMV7_APK%.apk}.txt"
+OUTPUT_NAMES=()
+if [[ "${BUILD_ANDROID_ARM64}" == "1" ]]; then
+    ARM64_SOURCE="${SCRIPT_DIR}/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+    ARM64_APK="${OUTPUT_DIR}/rustdesk-${VERSION}-arm64-v8a-signed.apk"
+    install -m 0644 "${ARM64_SOURCE}" "${ARM64_APK}"
+    validate_apk "${ARM64_APK}" arm64-v8a "${ARM64_APK%.apk}.txt"
+    OUTPUT_NAMES+=("$(basename "${ARM64_APK}")")
+fi
+if [[ "${BUILD_ANDROID_ARMV7}" == "1" ]]; then
+    ARMV7_SOURCE="${SCRIPT_DIR}/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk"
+    ARMV7_APK="${OUTPUT_DIR}/rustdesk-${VERSION}-armeabi-v7a-signed.apk"
+    install -m 0644 "${ARMV7_SOURCE}" "${ARMV7_APK}"
+    validate_apk "${ARMV7_APK}" armeabi-v7a "${ARMV7_APK%.apk}.txt"
+    OUTPUT_NAMES+=("$(basename "${ARMV7_APK}")")
+fi
 
 (
     cd "${OUTPUT_DIR}"
-    sha256sum "$(basename "${ARM64_APK}")" "$(basename "${ARMV7_APK}")" \
-        >SHA256SUMS
+    sha256sum "${OUTPUT_NAMES[@]}" >SHA256SUMS
 )
 
 echo "INFO: signed APKs are available in ${OUTPUT_DIR}"

@@ -222,8 +222,7 @@ pub fn need_fs_cm_send_files() -> bool {
     }
 }
 
-/// Android is scoped-storage only: the peer may never touch anything outside the app
-/// workspace (`Config::get_home()`, i.e. the app-specific external files directory).
+/// Android allows the app workspace and explicitly authorized unattended shared storage.
 ///
 /// Every peer supplied path must be validated with this before it reaches the
 /// filesystem, for reads, writes, renames, creations and deletions alike. The path is
@@ -234,6 +233,7 @@ pub fn need_fs_cm_send_files() -> bool {
 /// Callers must opt in to that protocol-specific behavior with `allow_empty`.
 #[cfg(target_os = "android")]
 pub fn is_peer_path_allowed(path: &str, allow_empty: bool) -> bool {
+    if crate::platform::android_storage::allows(path) { return true; }
     use std::path::{Component, Path, PathBuf};
 
     // Canonicalize the deepest existing ancestor and re-append the missing tail.

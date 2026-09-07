@@ -140,6 +140,14 @@ class MainActivity : FlutterActivity() {
                 "root_available" to false, "accessibility_ready" to InputService.isOpen,
                 "last_error" to "root_unavailable"
             )
+        if (BuildConfig.MANAGED_STORAGE && !ManagedStorage.ready(this)) {
+            if (Build.VERSION.SDK_INT >= 30) {
+                runRoot(executor, "appops set --uid $packageName MANAGE_EXTERNAL_STORAGE allow")
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                runRoot(executor, "pm grant $packageName android.permission.READ_EXTERNAL_STORAGE")
+                runRoot(executor, "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE")
+            }
+        }
         val component = "$packageName/$packageName.InputService"
         val current = runRoot(executor, "settings get secure enabled_accessibility_services")
         if (!current.ok) {
@@ -375,7 +383,16 @@ class MainActivity : FlutterActivity() {
                 "apply_unattended" -> {
                     val requested = call.arguments as? String ?: "disabled"
                     thread {
-                        val value = applyUnattended(requested)
+                        val value = applyUnattended(requested).toMutableMap()
+                        val storageReady = ManagedStorage.ready(this)
+                        value["all_files_access_ready"] = storageReady
+                        value["shared_storage_root"] = if (storageReady) ManagedStorage.root() else ""
+                        if (requested != "disabled" && !storageReady) {
+                            value["status"] = if (value["root_available"] == true) "partial" else "pending_user_action"
+                            value["last_error"] = if (!BuildConfig.MANAGED_STORAGE) "managed_storage_not_in_build"
+                                else if (value["root_available"] == true) "all_files_access_grant_failed"
+                                else "all_files_access_user_action_required"
+                        }
                         runOnUiThread { result.success(value) }
                     }
                 }
@@ -386,6 +403,11 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "check_managed_storage" -> result.success(mapOf(
+                    "ready" to ManagedStorage.ready(this),
+                    "root" to if (ManagedStorage.ready(this)) ManagedStorage.root() else ""
+                ))
+                "request_managed_storage" -> result.success(ManagedStorage.request(this))
                 "stop_service" -> {
                     Log.d(logTag, "Stop service")
                     mainService?.let {

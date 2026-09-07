@@ -81,10 +81,34 @@ protobuf {
     }
 }
 
+def managedStorage = project.findProperty('managedStorage') == 'true'
+def managedManifest = file("$buildDir/generated/managedStorage/AndroidManifest.xml")
+if (managedStorage) {
+    def prepareManagedManifest = tasks.register('prepareManagedStorageManifest') {
+        def original = file('src/main/AndroidManifest.xml')
+        inputs.file(original)
+        outputs.file(managedManifest)
+        doLast {
+            managedManifest.parentFile.mkdirs()
+            // Merger directives cannot use manifest placeholders.
+            managedManifest.text = original.getText('UTF-8').replaceAll(
+                /(android:name="android.permission.(?:MANAGE|READ|WRITE)_EXTERNAL_STORAGE"[^>]*?)tools:node="remove"/,
+                '$1tools:node="merge"')
+        }
+    }
+    tasks.configureEach {
+        if (name.startsWith('process') && name.contains('Manifest')) {
+            dependsOn(prepareManagedManifest)
+        }
+    }
+}
+
 android {
+    buildFeatures { buildConfig true }
     namespace "com.carriez.flutter_hbb"
     compileSdkVersion 36
     sourceSets {
+        if (managedStorage) main.manifest.srcFile managedManifest
         main.java.srcDirs += 'src/main/kotlin'
 
         main.proto.srcDirs += '../../../libs/hbb_common/protos'
@@ -98,6 +122,8 @@ android {
     }
 
     defaultConfig {
+        buildConfigField 'boolean', 'MANAGED_STORAGE', managedStorage.toString()
+        manifestPlaceholders.managedStorageEnabled = managedStorage.toString()
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.carriez.flutter_hbb"
         minSdkVersion 22

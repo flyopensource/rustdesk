@@ -1004,7 +1004,8 @@ async fn handle_fs(
             _ => None,
         };
         if let Some((path, id, file_num, allow_empty)) = checked {
-            if !crate::common::is_peer_path_allowed(path, allow_empty) {
+            if !crate::common::is_peer_path_allowed(path, allow_empty)
+                || (!allow_empty && crate::platform::android_storage::is_shared_root(path)) {
                 log::warn!("Reject file operation outside the app workspace: {}", path);
                 if id >= 0 {
                     send_raw(fs::new_error(id, "Permission denied", file_num), tx);

@@ -626,14 +626,19 @@ class _PermissionCheckerState extends State<PermissionChecker> {
               ? PermissionRow(translate("Audio Capture"), serverModel.audioOk,
                   serverModel.toggleAudio,
                   enabled: !permissionChangeLocked)
-              : Row(children: [
+              : SizedBox.shrink(),
+          if (androidUnattendedEnabled)
+            PermissionRow(translate("Files"), serverModel.allFilesAccessReady,
+                serverModel.requestManagedStorage),
+          !hasAudioPermission
+              ? Row(children: [
                   Icon(Icons.info_outline).marginOnly(right: 15),
                   Expanded(
                       child: Text(
                     translate("android_version_audio_tip"),
                     style: const TextStyle(color: MyTheme.darkGray),
                   ))
-                ]),
+                ]) : SizedBox.shrink(),
           PermissionRow(
             translate("Enable clipboard"),
             serverModel.clipboardOk,

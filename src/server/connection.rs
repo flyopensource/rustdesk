@@ -3361,7 +3361,8 @@ impl Connection {
                                 _ => None,
                             };
                             if let Some((path, job_id, allow_empty)) = checked {
-                                if !crate::common::is_peer_path_allowed(path, allow_empty) {
+                                if !crate::common::is_peer_path_allowed(path, allow_empty)
+                                    || (!allow_empty && crate::platform::android_storage::is_shared_root(path)) {
                                     log::warn!(
                                         "Reject file action outside the app workspace: {}",
                                         path
@@ -5305,6 +5306,10 @@ impl Connection {
     }
 
     fn read_dir(&mut self, dir: &str, include_hidden: bool) {
+        #[cfg(target_os = "android")]
+        let storage_root = crate::platform::android_storage::shared_root();
+        #[cfg(target_os = "android")]
+        let dir = if dir.is_empty() { storage_root.as_deref().unwrap_or(dir) } else { dir };
         let dir = dir.to_string();
         self.send_fs(ipc::FS::ReadDir {
             dir,

@@ -297,6 +297,7 @@ async fn start_hbbs_sync_async() {
                         "root_available": LocalConfig::get_option("android-unattended-root-available") == "Y",
                         "screen_capture_ready": LocalConfig::get_option("android-unattended-screen-capture-ready") == "Y",
                         "accessibility_ready": LocalConfig::get_option("android-unattended-accessibility-ready") == "Y",
+                        "all_files_access_ready": LocalConfig::get_option("android-unattended-all-files-access-ready") == "Y",
                         "service_running": LocalConfig::get_option("android-unattended-service-running") == "Y",
                         "last_error": LocalConfig::get_option("android-unattended-last-error"),
                     });

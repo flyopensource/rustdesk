@@ -9,6 +9,7 @@ JNI_DIR="${ANDROID_DIR}/app/src/main/jniLibs"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/build/local-apk}"
 SYMBOL_DIR="${SYMBOL_DIR:-${SCRIPT_DIR}/build/split-debug-info}"
 TEMP_SOURCE_BACKUP=""
+export ORG_GRADLE_PROJECT_managedStorage=true
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then

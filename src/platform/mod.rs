@@ -1,5 +1,8 @@
 #[cfg(target_os = "linux")]
 pub use linux::*;
+
+#[cfg(target_os = "android")]
+pub mod android_storage;
 #[cfg(target_os = "macos")]
 pub use macos::*;
 #[cfg(windows)]

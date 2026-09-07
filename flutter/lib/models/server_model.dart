@@ -45,6 +45,33 @@ class ServerModel with ChangeNotifier {
   bool _applyingUnattended = false;
   String _unattendedAttemptedRevision = '';
   DateTime? _unattendedRetryAt;
+  DateTime? _storageCheckedAt;
+  bool _checkingStorage = false;
+  bool allFilesAccessReady = false;
+
+  Future<void> refreshManagedStorage() async {
+    if (_checkingStorage || !isAndroid || parent.target == null) return;
+    _checkingStorage = true;
+    try {
+      final state = await parent.target?.invokeMethodWithResult<Map<dynamic, dynamic>>('check_managed_storage');
+      allFilesAccessReady = state?['ready'] == true;
+      await bind.mainSetLocalOption(key: 'android-unattended-all-files-access-ready', value: allFilesAccessReady ? 'Y' : 'N');
+      await bind.mainSetLocalOption(key: 'android-unattended-shared-storage-root', value: allFilesAccessReady ? '${state?['root'] ?? ''}' : '');
+      if (androidUnattendedEnabled && !allFilesAccessReady) {
+        await bind.mainSetLocalOption(key: 'android-unattended-status', value: 'partial');
+        await bind.mainSetLocalOption(key: 'android-unattended-last-error', value: 'all_files_access_user_action_required');
+        _unattendedRetryAt ??= DateTime.now();
+      }
+      notifyListeners();
+    } finally {
+      _checkingStorage = false;
+    }
+  }
+
+  Future<void> requestManagedStorage() async {
+    await parent.target?.invokeMethodWithResult<bool>('request_managed_storage');
+    await refreshManagedStorage();
+  }
 
   late String _emptyIdShow;
   late final IDTextEditingController _serverId;
@@ -187,6 +214,10 @@ class ServerModel with ChangeNotifier {
       final unattendedRevision =
           bind.mainGetLocalOption(key: 'android-unattended-policy-revision');
       final now = DateTime.now();
+      if (isAndroid && (_storageCheckedAt == null || now.difference(_storageCheckedAt!).inSeconds >= 10)) {
+        _storageCheckedAt = now;
+        await refreshManagedStorage();
+      }
       if (!_applyingUnattended &&
           parent.target != null &&
           (unattendedRevision != _unattendedAttemptedRevision ||
@@ -205,6 +236,7 @@ class ServerModel with ChangeNotifier {
                       : 'disabled');
           if (result is Map) {
             final unattendedResult = Map<dynamic, dynamic>.from(result);
+            await refreshManagedStorage();
             bind.mainSetLocalOption(
                 key: 'android-unattended-status',
                 value: '${unattendedResult['status'] ?? 'failed'}');

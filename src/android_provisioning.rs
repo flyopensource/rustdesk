@@ -71,7 +71,6 @@ struct ServerProfilePolicy {
     enabled: bool,
     id_server: String,
     relay_server: String,
-    api_server: String,
     key: String,
     permanent_password: String,
 }
@@ -283,10 +282,7 @@ fn decode_policy(bytes: &[u8], id: &str, uuid: &str) -> ResultType<PolicyPayload
         || payload.expires_at <= payload.issued_at
         || payload.target.rustdesk_id != id
         || payload.target.uuid != uuid
-        || !matches!(
-            payload.android.unattended.root_command.as_str(),
-            "auto" | "su" | "testsu" | "disabled"
-        )
+        || !valid_root_command(&payload.android.unattended.root_command)
     {
         bail!("Invalid provisioning policy")
     }
@@ -301,29 +297,34 @@ fn validate_server_profile(profile: &ServerProfilePolicy) -> ResultType<()> {
     if profile.id_server.trim().is_empty()
         || profile.id_server != profile.id_server.trim()
         || profile.relay_server != profile.relay_server.trim()
-        || profile.api_server != profile.api_server.trim()
         || profile.id_server.chars().any(char::is_whitespace)
         || profile.relay_server.chars().any(char::is_whitespace)
         || profile.id_server.len() > 255
         || profile.relay_server.len() > 255
-        || profile.api_server.len() > 255
         || profile.key.len() > 255
         || profile.permanent_password.len() > 255
     {
         bail!("Invalid hidden server profile")
     }
-    if !profile.api_server.is_empty() {
-        let url = reqwest::Url::parse(&profile.api_server).context("Invalid hidden API server")?;
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            bail!("Invalid hidden API server")
-        }
-    }
     Ok(())
+}
+
+fn valid_root_command(value: &str) -> bool {
+    value == "auto"
+        || value != "disabled"
+            && !value.is_empty()
+            && value.len() <= 255
+            && !value
+                .chars()
+                .any(|char| char.is_whitespace() || char.is_control())
+}
+
+fn current_provisioning_api_server() -> String {
+    cached_bootstrap()
+        .ok()
+        .flatten()
+        .map(|(payload, _)| payload.provisioning_api_server)
+        .unwrap_or_default()
 }
 
 fn activate_server_profile(profile: &ServerProfilePolicy) -> bool {
@@ -334,7 +335,7 @@ fn activate_server_profile(profile: &ServerProfilePolicy) -> bool {
             profile.id_server.clone(),
         );
         options.insert("relay-server".to_owned(), profile.relay_server.clone());
-        options.insert("api-server".to_owned(), profile.api_server.clone());
+        options.insert("api-server".to_owned(), current_provisioning_api_server());
         options.insert("key".to_owned(), profile.key.clone());
     }
     hbb_common::config::Config::set_hidden_server_profile(
@@ -359,8 +360,15 @@ pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
         bail!("Provisioning policy revision rollback")
     }
     LocalConfig::set_option(POLICY_CACHE_OPTION.to_owned(), encoded.to_owned());
-    LocalConfig::set_option(POLICY_REVISION_OPTION.to_owned(), payload.revision.to_string());
-    let unattended_enabled = if payload.android.unattended.enabled { "Y" } else { "N" };
+    LocalConfig::set_option(
+        POLICY_REVISION_OPTION.to_owned(),
+        payload.revision.to_string(),
+    );
+    let unattended_enabled = if payload.android.unattended.enabled {
+        "Y"
+    } else {
+        "N"
+    };
     if LocalConfig::get_option(UNATTENDED_ENABLED_OPTION) != unattended_enabled
         || LocalConfig::get_option(UNATTENDED_ROOT_OPTION)
             != payload.android.unattended.root_command
@@ -521,12 +529,22 @@ pub async fn provisioning_api_server() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::signature_message;
+    use super::{signature_message, valid_root_command};
 
     #[test]
     fn signature_message_binds_purpose_and_key_id() {
         let first = signature_message(1, "bootstrap", "android-v1", &[1; 24], &[2; 8]);
         let second = signature_message(1, "policy", "android-v1", &[1; 24], &[2; 8]);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn root_executor_accepts_a_single_name_or_path() {
+        for value in ["auto", "su", "testsu", "/system/xbin/custom-su"] {
+            assert!(valid_root_command(value));
+        }
+        for value in ["", "disabled", "su -c", "/system/bin/su\n"] {
+            assert!(!valid_root_command(value));
+        }
     }
 }

@@ -43,6 +43,8 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 
 private data class RootResult(val ok: Boolean, val output: String)
+private data class RootExecutor(val command: String, val style: RootCommandStyle)
+private enum class RootCommandStyle { DASH_C, UID_SHELL }
 
 
 class MainActivity : FlutterActivity() {
@@ -77,10 +79,14 @@ class MainActivity : FlutterActivity() {
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
 
-    private fun runRoot(executor: String, command: String): RootResult {
-        if (executor != "su" && executor != "testsu") return RootResult(false, "")
+    private fun runRoot(executor: RootExecutor, command: String): RootResult {
+        if (!validRootExecutor(executor.command)) return RootResult(false, "")
+        val commandLine = when (executor.style) {
+            RootCommandStyle.DASH_C -> listOf(executor.command, "-c", command)
+            RootCommandStyle.UID_SHELL -> listOf(executor.command, "0", "sh", "-c", command)
+        }
         val process = try {
-            ProcessBuilder(executor, "-c", command).redirectErrorStream(true).start()
+            ProcessBuilder(commandLine).redirectErrorStream(true).start()
         } catch (_: Exception) {
             return RootResult(false, "")
         }
@@ -98,6 +104,22 @@ class MainActivity : FlutterActivity() {
         return RootResult(false, "")
     }
 
+    private fun validRootExecutor(command: String): Boolean {
+        return command.isNotEmpty() && command.length <= 255 && command != "disabled" &&
+                command.none { it.isWhitespace() || it.isISOControl() }
+    }
+
+    private fun findRootExecutor(commands: List<String>): RootExecutor? {
+        for (command in commands) {
+            for (style in RootCommandStyle.values()) {
+                val executor = RootExecutor(command, style)
+                val result = runRoot(executor, "id -u")
+                if (result.ok && result.output == "0") return executor
+            }
+        }
+        return null
+    }
+
     private fun applyUnattended(requested: String): Map<String, Any> {
         if (requested == "disabled") {
             getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
@@ -109,12 +131,10 @@ class MainActivity : FlutterActivity() {
             )
         }
         val candidates = when (requested) {
-            "su" -> listOf("su")
-            "testsu" -> listOf("testsu")
             "auto" -> listOf("su", "testsu")
-            else -> emptyList()
+            else -> if (validRootExecutor(requested)) listOf(requested) else emptyList()
         }
-        val executor = candidates.firstOrNull { runRoot(it, "id -u").let { result -> result.ok && result.output == "0" } }
+        val executor = findRootExecutor(candidates)
             ?: return mapOf(
                 "status" to "pending_user_action", "root_executor" to "",
                 "root_available" to false, "accessibility_ready" to InputService.isOpen,
@@ -123,12 +143,12 @@ class MainActivity : FlutterActivity() {
         val component = "$packageName/$packageName.InputService"
         val current = runRoot(executor, "settings get secure enabled_accessibility_services")
         if (!current.ok) {
-            return mapOf("status" to "failed", "root_executor" to executor, "root_available" to true,
+            return mapOf("status" to "failed", "root_executor" to executor.command, "root_available" to true,
                 "accessibility_ready" to false, "last_error" to "accessibility_read_failed")
         }
         val existing = current.output.takeUnless { it == "null" } ?: ""
         if (!existing.matches(Regex("[A-Za-z0-9_./:$-]*"))) {
-            return mapOf("status" to "failed", "root_executor" to executor, "root_available" to true,
+            return mapOf("status" to "failed", "root_executor" to executor.command, "root_available" to true,
                 "accessibility_ready" to false, "last_error" to "accessibility_value_invalid")
         }
         val services = existing.split(':').filter { it.isNotEmpty() }.toMutableList()
@@ -143,7 +163,7 @@ class MainActivity : FlutterActivity() {
         val ok = accessibilitySet.ok && projectionSet.ok && bootSet.ok
         return mapOf(
             "status" to if (ok) "success" else "partial",
-            "root_executor" to executor, "root_available" to true,
+            "root_executor" to executor.command, "root_available" to true,
             "accessibility_ready" to InputService.isOpen,
             "last_error" to if (ok) "" else if (!accessibilitySet.ok) "accessibility_enable_failed"
                 else if (!projectionSet.ok) "screen_capture_grant_failed" else "boot_permission_grant_failed"

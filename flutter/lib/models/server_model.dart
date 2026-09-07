@@ -44,6 +44,7 @@ class ServerModel with ChangeNotifier {
   int _zeroClientLengthCounter = 0;
   bool _applyingUnattended = false;
   String _unattendedAttemptedRevision = '';
+  DateTime? _unattendedRetryAt;
 
   late String _emptyIdShow;
   late final IDTextEditingController _serverId;
@@ -185,11 +186,15 @@ class ServerModel with ChangeNotifier {
 
       final unattendedRevision =
           bind.mainGetLocalOption(key: 'android-unattended-policy-revision');
+      final now = DateTime.now();
       if (!_applyingUnattended &&
           parent.target != null &&
-          unattendedRevision != _unattendedAttemptedRevision) {
+          (unattendedRevision != _unattendedAttemptedRevision ||
+              (_unattendedRetryAt != null &&
+                  !now.isBefore(_unattendedRetryAt!)))) {
         _applyingUnattended = true;
         _unattendedAttemptedRevision = unattendedRevision;
+        _unattendedRetryAt = now.add(const Duration(seconds: 30));
         try {
           final result = await parent.target
               ?.invokeMethodWithResult<Map<dynamic, dynamic>>(
@@ -220,8 +225,13 @@ class ServerModel with ChangeNotifier {
             bind.mainSetLocalOption(
                 key: 'android-unattended-policy-revision-applied',
                 value: unattendedRevision);
+            if (unattendedResult['status'] == 'success' ||
+                unattendedResult['status'] == 'disabled') {
+              _unattendedRetryAt = null;
+            }
             if (androidUnattendedEnabled &&
-                unattendedResult['root_available'] == true) {
+                unattendedResult['root_available'] == true &&
+                !_isStart) {
               await startService();
             }
           }

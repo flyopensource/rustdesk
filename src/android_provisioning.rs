@@ -1,7 +1,7 @@
 use hbb_common::{
     anyhow::{anyhow, bail, Context},
     base64::{engine::general_purpose::STANDARD, Engine as _},
-    config::LocalConfig,
+    config::{Config, LocalConfig},
     sodiumoxide::crypto::{auth, secretbox, sign},
     tls::TlsType,
     ResultType,
@@ -16,6 +16,12 @@ pub const UNATTENDED_ENABLED_OPTION: &str = "android-unattended-enabled";
 pub const UNATTENDED_ROOT_OPTION: &str = "android-unattended-root-command";
 pub const UNATTENDED_REVISION_OPTION: &str = "android-unattended-policy-revision";
 pub const POLICY_REVISION_OPTION: &str = "android-provisioning-policy-revision";
+pub const DEVICE_ID_OPTION: &str = "android-provisioning-device-id";
+const CONNECTION_ID_REQUESTED_OPTION: &str = "android-provisioning-connection-id-requested";
+const CONNECTION_ID_ACTIVE_OPTION: &str = "android-provisioning-connection-id-active";
+const CONNECTION_ID_STATUS_OPTION: &str = "android-provisioning-connection-id-status";
+const CONNECTION_ID_REVISION_OPTION: &str = "android-provisioning-connection-id-revision";
+const CONNECTION_ID_ERROR_OPTION: &str = "android-provisioning-connection-id-error";
 const MAX_ENVELOPE_SIZE: usize = 64 * 1024;
 const MAX_PLAINTEXT_SIZE: usize = 16 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -48,8 +54,16 @@ struct BootstrapPayload {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyTarget {
-    rustdesk_id: String,
+    device_id: i64,
     uuid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectionIdPolicy {
+    requested_id: String,
+    status: String,
+    revision: i64,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +97,7 @@ struct PolicyPayload {
     issued_at: i64,
     expires_at: i64,
     target: PolicyTarget,
+    connection_id: ConnectionIdPolicy,
     android: AndroidPolicy,
     #[serde(default)]
     server_profile: ServerProfilePolicy,
@@ -224,7 +239,7 @@ fn decode_bootstrap(bytes: &[u8]) -> ResultType<BootstrapPayload> {
     Ok(payload)
 }
 
-fn decode_policy(bytes: &[u8], id: &str, uuid: &str) -> ResultType<PolicyPayload> {
+fn decode_policy(bytes: &[u8], device_id: Option<i64>, uuid: &str) -> ResultType<PolicyPayload> {
     if bytes.is_empty() || bytes.len() > 256 * 1024 {
         bail!("Invalid provisioning policy size")
     }
@@ -275,19 +290,38 @@ fn decode_policy(bytes: &[u8], id: &str, uuid: &str) -> ResultType<PolicyPayload
     let payload: PolicyPayload =
         serde_json::from_slice(&plaintext).context("Invalid provisioning policy payload")?;
     let now = hbb_common::get_time() / 1000;
-    if payload.version != ENVELOPE_VERSION
+    if payload.version != 2
         || payload.revision == 0
         || payload.issued_at > now + 300
         || payload.expires_at <= now
         || payload.expires_at <= payload.issued_at
-        || payload.target.rustdesk_id != id
+        || payload.target.device_id <= 0
+        || device_id.map_or(false, |id| payload.target.device_id != id)
         || payload.target.uuid != uuid
         || !valid_root_command(&payload.android.unattended.root_command)
+        || !valid_connection_id_policy(&payload.connection_id)
     {
         bail!("Invalid provisioning policy")
     }
     validate_server_profile(&payload.server_profile)?;
     Ok(payload)
+}
+
+fn valid_connection_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (6..=16).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn valid_connection_id_policy(policy: &ConnectionIdPolicy) -> bool {
+    match policy.status.as_str() {
+        "" => policy.requested_id.is_empty() && policy.revision == 0,
+        "pending" => valid_connection_id(&policy.requested_id) && policy.revision > 0,
+        _ => false,
+    }
 }
 
 fn validate_server_profile(profile: &ServerProfilePolicy) -> ResultType<()> {
@@ -348,11 +382,11 @@ fn activate_server_profile(profile: &ServerProfilePolicy) -> bool {
     )
 }
 
-pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
+pub async fn apply_policy(encoded: &str, device_id: i64, uuid: &str) -> ResultType<u64> {
     let bytes = STANDARD
         .decode(encoded)
         .context("Invalid provisioning policy encoding")?;
-    let payload = decode_policy(&bytes, id, uuid)?;
+    let payload = decode_policy(&bytes, Some(device_id), uuid)?;
     let cached_revision = LocalConfig::get_option(POLICY_REVISION_OPTION)
         .parse::<u64>()
         .unwrap_or(0);
@@ -387,13 +421,16 @@ pub fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<u64> {
         );
     }
     let profile_changed = activate_server_profile(&payload.server_profile);
-    if profile_changed && !hbb_common::config::Config::is_manual_server_profile() {
+    let connection_id_changed = apply_connection_id(&payload.connection_id).await;
+    if (profile_changed || connection_id_changed)
+        && !hbb_common::config::Config::is_manual_server_profile()
+    {
         crate::rendezvous_mediator::RendezvousMediator::restart();
     }
     Ok(payload.revision)
 }
 
-pub fn restore_cached_policy(id: &str, uuid: &str) -> ResultType<()> {
+pub fn restore_cached_policy(uuid: &str) -> ResultType<()> {
     let encoded = LocalConfig::get_option(POLICY_CACHE_OPTION);
     if encoded.is_empty() {
         return Ok(());
@@ -401,9 +438,122 @@ pub fn restore_cached_policy(id: &str, uuid: &str) -> ResultType<()> {
     let bytes = STANDARD
         .decode(&encoded)
         .context("Invalid cached provisioning policy")?;
-    let payload = decode_policy(&bytes, id, uuid)?;
+    let device_id = LocalConfig::get_option(DEVICE_ID_OPTION)
+        .parse::<i64>()
+        .context("Missing cached device identity")?;
+    let payload = decode_policy(&bytes, Some(device_id), uuid)?;
     activate_server_profile(&payload.server_profile);
     Ok(())
+}
+
+async fn apply_connection_id(policy: &ConnectionIdPolicy) -> bool {
+    if policy.status != "pending" || policy.requested_id.is_empty() {
+        return false;
+    }
+    let active_id = Config::get_id();
+    LocalConfig::set_option(
+        CONNECTION_ID_REQUESTED_OPTION.to_owned(),
+        policy.requested_id.clone(),
+    );
+    if active_id == policy.requested_id {
+        store_connection_id_result(
+            &policy.requested_id,
+            &active_id,
+            "applied",
+            policy.revision,
+            "",
+        );
+        return false;
+    }
+    if Config::is_manual_server_profile() {
+        store_connection_id_result(
+            &policy.requested_id,
+            &active_id,
+            "failed",
+            policy.revision,
+            "manual_server_profile",
+        );
+        return false;
+    }
+    match register_connection_id(&policy.requested_id).await {
+        Ok(()) => {
+            crate::rendezvous_mediator::reset_needs_deploy_notification();
+            store_connection_id_result(
+                &policy.requested_id,
+                &policy.requested_id,
+                "applied",
+                policy.revision,
+                "",
+            );
+            true
+        }
+        Err(error) => {
+            store_connection_id_result(
+                &policy.requested_id,
+                &active_id,
+                "failed",
+                policy.revision,
+                &error,
+            );
+            false
+        }
+    }
+}
+
+async fn register_connection_id(id: &str) -> Result<(), String> {
+    if Config::get_rendezvous_servers().is_empty() {
+        return Err("id_server_unavailable".to_owned());
+    }
+    let old_id = Config::get_id();
+    match crate::ui_interface::change_id_shared_(id.to_owned(), old_id).await {
+        "" => Ok(()),
+        "Not available" => Err("id_taken".to_owned()),
+        "Too frequent" => Err("id_registration_too_frequent".to_owned()),
+        "server_not_support" => Err("id_server_not_supported".to_owned()),
+        "Invalid format" => Err("invalid_connection_id".to_owned()),
+        "Failed to connect to rendezvous server" => Err("id_server_unavailable".to_owned()),
+        "Server error" => Err("id_server_error".to_owned()),
+        _ => Err("id_registration_failed".to_owned()),
+    }
+}
+
+fn store_connection_id_result(
+    requested_id: &str,
+    active_id: &str,
+    status: &str,
+    revision: i64,
+    error: &str,
+) {
+    LocalConfig::set_option(
+        CONNECTION_ID_REQUESTED_OPTION.to_owned(),
+        requested_id.to_owned(),
+    );
+    LocalConfig::set_option(CONNECTION_ID_ACTIVE_OPTION.to_owned(), active_id.to_owned());
+    LocalConfig::set_option(CONNECTION_ID_STATUS_OPTION.to_owned(), status.to_owned());
+    LocalConfig::set_option(
+        CONNECTION_ID_REVISION_OPTION.to_owned(),
+        revision.to_string(),
+    );
+    LocalConfig::set_option(CONNECTION_ID_ERROR_OPTION.to_owned(), error.to_owned());
+}
+
+pub fn connection_id_report() -> Option<serde_json::Value> {
+    let status = LocalConfig::get_option(CONNECTION_ID_STATUS_OPTION);
+    if status != "applied" && status != "failed" {
+        return None;
+    }
+    Some(serde_json::json!({
+        "requested_id": LocalConfig::get_option(CONNECTION_ID_REQUESTED_OPTION),
+        "active_id": LocalConfig::get_option(CONNECTION_ID_ACTIVE_OPTION),
+        "status": status,
+        "revision": LocalConfig::get_option(CONNECTION_ID_REVISION_OPTION).parse::<i64>().unwrap_or(0),
+        "last_error": LocalConfig::get_option(CONNECTION_ID_ERROR_OPTION),
+    }))
+}
+
+pub fn mark_connection_id_reported() {
+    LocalConfig::set_option(CONNECTION_ID_STATUS_OPTION.to_owned(), String::new());
+    LocalConfig::set_option(CONNECTION_ID_ERROR_OPTION.to_owned(), String::new());
 }
 
 pub fn server_profile_source() -> &'static str {
@@ -529,7 +679,7 @@ pub async fn provisioning_api_server() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{signature_message, valid_root_command};
+    use super::{signature_message, valid_connection_id, valid_root_command};
 
     #[test]
     fn signature_message_binds_purpose_and_key_id() {
@@ -545,6 +695,23 @@ mod tests {
         }
         for value in ["", "disabled", "su -c", "/system/bin/su\n"] {
             assert!(!valid_root_command(value));
+        }
+    }
+
+    #[test]
+    fn managed_connection_id_is_lowercase_ascii() {
+        for value in ["shop23", "shop23-a01", "a12345"] {
+            assert!(valid_connection_id(value));
+        }
+        for value in [
+            "short",
+            "Shop23",
+            "1shop23",
+            "shop_23",
+            "商店-a01",
+            "shop-id-that-is-too-long",
+        ] {
+            assert!(!valid_connection_id(value));
         }
     }
 }

@@ -1797,9 +1797,8 @@ pub fn main_init(app_dir: String, custom_client_config: String) {
     initialize(&app_dir, &custom_client_config);
     #[cfg(target_os = "android")]
     {
-        let id = hbb_common::config::Config::get_id();
         let uuid = crate::encode64(hbb_common::get_uuid());
-        if let Err(error) = crate::android_provisioning::restore_cached_policy(&id, &uuid) {
+        if let Err(error) = crate::android_provisioning::restore_cached_policy(&uuid) {
             log::warn!("Cached provisioning policy rejected: {}", error);
         }
         crate::hbbs_http::sync::start();

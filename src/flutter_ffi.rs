@@ -2947,6 +2947,15 @@ pub mod server_side {
                 crate::read_custom_client(&custom_client_config);
             }
         }
+        hbb_common::init_log(false, "");
+        config::Config::set_provisioned_server_required(
+            crate::android_provisioning::is_configured(),
+        );
+        let id = config::Config::get_id();
+        let uuid = crate::encode64(hbb_common::get_uuid());
+        if let Err(error) = crate::android_provisioning::restore_cached_policy(&id, &uuid) {
+            log::warn!("Cached provisioning policy rejected: {}", error);
+        }
         std::thread::spawn(move || start_server(true));
     }
 

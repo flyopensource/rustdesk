@@ -1,5 +1,7 @@
 use super::*;
-use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
+use scrap::codec::{Quality, BR_BALANCED};
+#[cfg(not(target_os = "android"))]
+use scrap::codec::{BR_BEST, BR_SPEED};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -31,18 +33,34 @@ delay:
 pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
+#[cfg(not(target_os = "android"))]
 pub const INIT_FPS: u32 = 15;
+#[cfg(target_os = "android")]
+pub const INIT_FPS: u32 = 10;
 
 // Bitrate ratio constants for different quality levels
 const BR_MAX: f32 = 40.0; // 2000 * 2 / 100
 const BR_MIN: f32 = 0.2;
+#[cfg(not(target_os = "android"))]
 const BR_MIN_HIGH_RESOLUTION: f32 = 0.1; // For high resolution, BR_MIN is still too high, so we set a lower limit
+#[cfg(not(target_os = "android"))]
 const MAX_BR_MULTIPLE: f32 = 1.0;
 
 const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
+
+#[cfg(any(target_os = "android", test))]
+const ANDROID_PROBE_SAMPLES: usize = 2;
+#[cfg(any(target_os = "android", test))]
+const ANDROID_START_RATIO: f32 = 0.08;
+#[cfg(any(target_os = "android", test))]
+const ANDROID_MIN_RATIO: f32 = 0.05;
+#[cfg(any(target_os = "android", test))]
+const ANDROID_GOOD_DELAY_MS: u32 = 100;
+#[cfg(any(target_os = "android", test))]
+const ANDROID_SEVERE_DELAY_MS: u32 = 300;
 
 #[derive(Default, Debug, Clone)]
 struct UserDelay {
@@ -157,7 +175,11 @@ impl VideoQoS {
 
     // Get current bitrate ratio with bounds checking
     pub fn ratio(&mut self) -> f32 {
-        if self.ratio < BR_MIN_HIGH_RESOLUTION || self.ratio > BR_MAX {
+        #[cfg(target_os = "android")]
+        let min_ratio = ANDROID_MIN_RATIO;
+        #[cfg(not(target_os = "android"))]
+        let min_ratio = BR_MIN_HIGH_RESOLUTION;
+        if self.ratio < min_ratio || self.ratio > BR_MAX {
             self.ratio = BR_BALANCED;
         }
         self.ratio
@@ -187,6 +209,13 @@ impl VideoQoS {
         self.users.insert(id, UserData::default());
         self.abr_config = Config::get_option("enable-abr") != "N";
         self.new_user_instant = Instant::now();
+        #[cfg(target_os = "android")]
+        {
+            if self.abr_config {
+                self.fps = self.fps.min(INIT_FPS);
+                self.ratio = self.ratio.min(ANDROID_START_RATIO);
+            }
+        }
     }
 
     // Clean up user session
@@ -204,6 +233,10 @@ impl VideoQoS {
         if let Some(user) = self.users.get_mut(&id) {
             user.custom_fps = Some(fps);
         }
+        #[cfg(target_os = "android")]
+        {
+            self.adjust_fps();
+        }
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -212,6 +245,10 @@ impl VideoQoS {
         }
         if let Some(user) = self.users.get_mut(&id) {
             user.auto_adjust_fps = Some(fps);
+        }
+        #[cfg(target_os = "android")]
+        {
+            self.adjust_fps();
         }
     }
 
@@ -232,8 +269,18 @@ impl VideoQoS {
         let quality = Some((hbb_common::get_time(), convert_quality(image_quality)));
         if let Some(user) = self.users.get_mut(&id) {
             user.quality = quality;
-            // update ratio directly
-            self.ratio = self.latest_quality().ratio();
+            #[cfg(not(target_os = "android"))]
+            {
+                self.ratio = self.latest_quality().ratio();
+            }
+            #[cfg(target_os = "android")]
+            {
+                if self.abr_config {
+                    self.adjust_android_ratio();
+                } else {
+                    self.ratio = self.latest_quality().ratio();
+                }
+            }
         }
     }
 
@@ -245,9 +292,13 @@ impl VideoQoS {
 
     pub fn user_network_delay(&mut self, id: i32, delay: u32) {
         let highest_fps = self.highest_fps();
+        #[cfg(not(target_os = "android"))]
         let target_ratio = self.latest_quality().ratio();
 
         // For bad network, small fps means quick reaction and high quality
+        #[cfg(target_os = "android")]
+        let (min_fps, normal_fps) = (5, 10);
+        #[cfg(not(target_os = "android"))]
         let (min_fps, normal_fps) = if target_ratio >= BR_BEST {
             (8, 16)
         } else if target_ratio >= BR_BALANCED {
@@ -259,6 +310,7 @@ impl VideoQoS {
         // Calculate minimum acceptable delay-fps product
         let dividend_ms = DELAY_THRESHOLD_150MS * min_fps;
 
+        #[cfg(not(target_os = "android"))]
         let mut adjust_ratio = false;
         if let Some(user) = self.users.get_mut(&id) {
             let delay = delay.max(10);
@@ -323,13 +375,25 @@ impl VideoQoS {
 
             fps = fps.clamp(MIN_FPS, highest_fps);
             // first network delay message
-            adjust_ratio = user.delay.fps.is_none();
+            #[cfg(not(target_os = "android"))]
+            {
+                adjust_ratio = user.delay.fps.is_none();
+            }
             user.delay.fps = Some(fps);
         }
         self.adjust_fps();
-        if adjust_ratio && !cfg!(target_os = "linux") {
-            //Reduce the possibility of vaapi being created twice
-            self.adjust_ratio(false);
+        #[cfg(target_os = "android")]
+        {
+            if self.abr_config {
+                self.adjust_android_ratio();
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            if adjust_ratio && !cfg!(target_os = "linux") {
+                //Reduce the possibility of vaapi being created twice
+                self.adjust_ratio(false);
+            }
         }
     }
 
@@ -339,6 +403,12 @@ impl VideoQoS {
             if user.delay.response_delayed {
                 user.delay.add_delay(elapsed as u32);
                 self.adjust_fps();
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            if self.abr_config && elapsed > 2000 {
+                self.adjust_android_ratio();
             }
         }
     }
@@ -413,10 +483,20 @@ impl VideoQoS {
     }
 
     // Adjust quality ratio based on network delay and screen changes
-    fn adjust_ratio(&mut self, dynamic_screen: bool) {
+    fn adjust_ratio(&mut self, _dynamic_screen: bool) {
         if !self.in_vbr_state() {
             return;
         }
+        #[cfg(target_os = "android")]
+        {
+            self.adjust_android_ratio();
+        }
+        #[cfg(not(target_os = "android"))]
+        self.adjust_ratio_non_android(_dynamic_screen);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn adjust_ratio_non_android(&mut self, dynamic_screen: bool) {
         // Get maximum delay from all users
         let max_delay = self.users.iter().map(|u| u.1.delay.avg_delay()).max();
         let Some(max_delay) = max_delay else {
@@ -507,6 +587,24 @@ impl VideoQoS {
         self.adjust_ratio_instant = Instant::now();
     }
 
+    #[cfg(target_os = "android")]
+    fn adjust_android_ratio(&mut self) {
+        let target_ratio = self.latest_quality().ratio();
+        let probed = !self.users.is_empty()
+            && self
+                .users
+                .iter()
+                .all(|u| u.1.delay.delay_history.len() >= ANDROID_PROBE_SAMPLES);
+        let max_delay = self
+            .users
+            .iter()
+            .map(|u| u.1.delay.avg_delay())
+            .max()
+            .unwrap_or(DELAY_THRESHOLD_150MS);
+        self.ratio = android_next_ratio(self.ratio, target_ratio, max_delay, probed);
+        self.adjust_ratio_instant = Instant::now();
+    }
+
     // Adjust fps based on network delay and user response time
     fn adjust_fps(&mut self) {
         let highest_fps = self.highest_fps();
@@ -533,6 +631,51 @@ impl VideoQoS {
 
         // Ensure fps stays within valid range
         self.fps = fps.clamp(MIN_FPS, highest_fps);
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_next_ratio(current: f32, target: f32, max_delay: u32, probed: bool) -> f32 {
+    if !probed {
+        return current.min(target).min(ANDROID_START_RATIO);
+    }
+
+    let next = if max_delay < ANDROID_GOOD_DELAY_MS {
+        (current * 1.5).max(current + 0.02)
+    } else if max_delay < DELAY_THRESHOLD_150MS {
+        current * 1.1
+    } else if max_delay < ANDROID_SEVERE_DELAY_MS {
+        (current * 0.7).min(ANDROID_START_RATIO)
+    } else {
+        ANDROID_MIN_RATIO
+    };
+    next.clamp(ANDROID_MIN_RATIO.min(target), target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_ratio(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn android_starts_conservatively_until_network_is_probed() {
+        assert_ratio(android_next_ratio(BR_BALANCED, 1.0, 20, false), 0.08);
+    }
+
+    #[test]
+    fn android_recovers_towards_requested_quality_on_good_network() {
+        assert_ratio(android_next_ratio(0.08, 1.0, 80, true), 0.12);
+        assert_ratio(android_next_ratio(0.08, 0.1, 80, true), 0.1);
+        assert_ratio(android_next_ratio(0.08, 1.0, 120, true), 0.088);
+    }
+
+    #[test]
+    fn android_reduces_quality_immediately_on_weak_network() {
+        assert_ratio(android_next_ratio(0.2, 1.0, 200, true), 0.08);
+        assert_ratio(android_next_ratio(0.2, 1.0, 300, true), 0.05);
     }
 }
 

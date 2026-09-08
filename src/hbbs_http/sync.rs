@@ -19,6 +19,8 @@ const UPLOAD_SYSINFO_TIMEOUT: Duration = Duration::from_secs(120);
 const TIME_CONN: Duration = Duration::from_secs(3);
 
 #[cfg(target_os = "android")]
+const DEVICE_ID_OPTION: &str = "android-provisioning-device-id";
+#[cfg(target_os = "android")]
 const DEVICE_SEQUENCE_OPTION: &str = "android-provisioning-device-sequence";
 #[cfg(target_os = "android")]
 const DEVICE_API_HASH_OPTION: &str = "android-provisioning-device-api-hash";
@@ -115,7 +117,7 @@ async fn start_hbbs_sync_async() {
                     let api_server = url.trim_end_matches("/api/device/heartbeat");
                     let needs_registration = device_auth
                         .as_ref()
-                        .map(|state| state.api_server != api_server)
+                        .map(|state| state.api_server != api_server || state.rustdesk_id != id)
                         .unwrap_or(true);
                     if needs_registration {
                         device_auth = register_device(api_server, &id).await;
@@ -304,9 +306,6 @@ async fn start_hbbs_sync_async() {
                         "active_source": crate::android_provisioning::server_profile_source(),
                         "connected": hbb_common::config::get_online_state() > 0,
                     });
-                    if let Some(report) = crate::android_provisioning::connection_id_report() {
-                        v["connection_id_status"] = report;
-                    }
                 }
                 #[cfg(target_os = "android")]
                 let heartbeat_response = if requires_device_auth {
@@ -335,10 +334,6 @@ async fn start_hbbs_sync_async() {
                     if !(200..300).contains(&status) {
                         continue;
                     }
-                    #[cfg(target_os = "android")]
-                    if requires_device_auth {
-                        crate::android_provisioning::mark_connection_id_reported();
-                    }
                     if let Ok(mut rsp) = serde_json::from_str::<HashMap::<&str, Value>>(&s) {
                         if rsp.remove("sysinfo").is_some() {
                             info_uploaded.uploaded = false;
@@ -359,10 +354,7 @@ async fn start_hbbs_sync_async() {
                                 if requires_device_auth {
                                     if let Some(envelope) = strategy.extra.remove("android_provisioning") {
                                         let uuid = crate::encode64(hbb_common::get_uuid());
-                                        let Some(state) = device_auth.as_ref() else {
-                                            continue;
-                                        };
-                                        match crate::android_provisioning::apply_policy(&envelope, state.device_id, &uuid).await {
+                                        match crate::android_provisioning::apply_policy(&envelope, &id, &uuid) {
                                             Ok(_) => policy_applied = true,
                                             Err(error) => log::warn!("Provisioning policy rejected: {}", error),
                                         }
@@ -410,6 +402,7 @@ async fn heartbeat_target() -> (String, bool) {
 #[cfg(target_os = "android")]
 struct DeviceAuthState {
     api_server: String,
+    rustdesk_id: String,
     device_id: i64,
     next_sequence: i64,
 }
@@ -427,31 +420,28 @@ struct DeviceRegistrationResponse {
 }
 
 #[cfg(target_os = "android")]
-fn device_identity_hash(api_server: &str, uuid: &str) -> String {
+fn device_identity_hash(api_server: &str, id: &str) -> String {
     use hbb_common::sodiumoxide::crypto::hash::sha256;
-    let mut identity = Vec::with_capacity(api_server.len() + uuid.len() + 1);
+    let mut identity = Vec::with_capacity(api_server.len() + id.len() + 1);
     identity.extend_from_slice(api_server.as_bytes());
     identity.push(0);
-    identity.extend_from_slice(uuid.as_bytes());
+    identity.extend_from_slice(id.as_bytes());
     crate::encode64(sha256::hash(&identity).0)
 }
 
 #[cfg(target_os = "android")]
 fn clear_device_registration() {
-    LocalConfig::set_option(
-        crate::android_provisioning::DEVICE_ID_OPTION.to_owned(),
-        String::new(),
-    );
+    LocalConfig::set_option(DEVICE_ID_OPTION.to_owned(), String::new());
     LocalConfig::set_option(DEVICE_SEQUENCE_OPTION.to_owned(), String::new());
     LocalConfig::set_option(DEVICE_API_HASH_OPTION.to_owned(), String::new());
 }
 
 #[cfg(target_os = "android")]
-fn cached_device_auth(api_server: &str, uuid: &str) -> Option<DeviceAuthState> {
-    if LocalConfig::get_option(DEVICE_API_HASH_OPTION) != device_identity_hash(api_server, uuid) {
+fn cached_device_auth(api_server: &str, id: &str) -> Option<DeviceAuthState> {
+    if LocalConfig::get_option(DEVICE_API_HASH_OPTION) != device_identity_hash(api_server, id) {
         return None;
     }
-    let device_id = LocalConfig::get_option(crate::android_provisioning::DEVICE_ID_OPTION)
+    let device_id = LocalConfig::get_option(DEVICE_ID_OPTION)
         .parse::<i64>()
         .ok()?;
     let next_sequence = LocalConfig::get_option(DEVICE_SEQUENCE_OPTION)
@@ -460,6 +450,7 @@ fn cached_device_auth(api_server: &str, uuid: &str) -> Option<DeviceAuthState> {
         .max(1);
     (device_id > 0).then(|| DeviceAuthState {
         api_server: api_server.to_owned(),
+        rustdesk_id: id.to_owned(),
         device_id,
         next_sequence,
     })
@@ -482,8 +473,7 @@ fn registration_message(id: &str, uuid: &str, public_key: &[u8], timestamp: i64)
 
 #[cfg(target_os = "android")]
 async fn register_device(api_server: &str, id: &str) -> Option<DeviceAuthState> {
-    let uuid = crate::encode64(hbb_common::get_uuid());
-    if let Some(state) = cached_device_auth(api_server, &uuid) {
+    if let Some(state) = cached_device_auth(api_server, id) {
         return Some(state);
     }
     use hbb_common::sodiumoxide::crypto::{auth, sign};
@@ -506,6 +496,7 @@ async fn register_device(api_server: &str, id: &str) -> Option<DeviceAuthState> 
             return None;
         }
     };
+    let uuid = crate::encode64(hbb_common::get_uuid());
     let mut timestamp = hbb_common::get_time() / 1000;
     for attempt in 0..2 {
         let message = registration_message(id, &uuid, &key_pair.1, timestamp);
@@ -536,17 +527,15 @@ async fn register_device(api_server: &str, id: &str) -> Option<DeviceAuthState> 
         };
         if response.accepted && response.device_id > 0 {
             let next_sequence = response.last_sequence.saturating_add(1).max(1);
-            LocalConfig::set_option(
-                crate::android_provisioning::DEVICE_ID_OPTION.to_owned(),
-                response.device_id.to_string(),
-            );
+            LocalConfig::set_option(DEVICE_ID_OPTION.to_owned(), response.device_id.to_string());
             LocalConfig::set_option(DEVICE_SEQUENCE_OPTION.to_owned(), next_sequence.to_string());
             LocalConfig::set_option(
                 DEVICE_API_HASH_OPTION.to_owned(),
-                device_identity_hash(api_server, &uuid),
+                device_identity_hash(api_server, id),
             );
             return Some(DeviceAuthState {
                 api_server: api_server.to_owned(),
+                rustdesk_id: id.to_owned(),
                 device_id: response.device_id,
                 next_sequence,
             });

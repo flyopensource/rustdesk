@@ -123,7 +123,11 @@ class MainActivity : FlutterActivity() {
     private fun applyUnattended(requested: String): Map<String, Any> {
         if (requested == "disabled") {
             getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
-                .edit().putBoolean(KEY_START_ON_BOOT_OPT, false).apply()
+                .edit()
+                .putBoolean(KEY_START_ON_BOOT_OPT, false)
+                .remove(KEY_UNATTENDED_ROOT_COMMAND)
+                .remove(KEY_UNATTENDED_ROOT_STYLE)
+                .apply()
             return mapOf(
                 "status" to "disabled", "root_executor" to "",
                 "root_available" to false, "accessibility_ready" to InputService.isOpen,
@@ -140,14 +144,15 @@ class MainActivity : FlutterActivity() {
                 "root_available" to false, "accessibility_ready" to InputService.isOpen,
                 "last_error" to "root_unavailable"
             )
-        if (BuildConfig.MANAGED_STORAGE && !ManagedStorage.ready(this)) {
+        val storageSet = if (BuildConfig.MANAGED_STORAGE) {
             if (Build.VERSION.SDK_INT >= 30) {
                 runRoot(executor, "appops set --uid $packageName MANAGE_EXTERNAL_STORAGE allow")
             } else if (Build.VERSION.SDK_INT >= 23) {
                 runRoot(executor, "pm grant $packageName android.permission.READ_EXTERNAL_STORAGE")
                 runRoot(executor, "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE")
-            }
-        }
+            } else RootResult(true, "")
+        } else RootResult(true, "")
+        val screenSet = runRoot(executor, "input keyevent KEYCODE_WAKEUP")
         val component = "$packageName/$packageName.InputService"
         val current = runRoot(executor, "settings get secure enabled_accessibility_services")
         if (!current.ok) {
@@ -167,13 +172,19 @@ class MainActivity : FlutterActivity() {
         val bootSet = runRoot(executor,
             "appops set $packageName SYSTEM_ALERT_WINDOW allow && dumpsys deviceidle whitelist +$packageName")
         getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
-            .edit().putBoolean(KEY_START_ON_BOOT_OPT, true).apply()
-        val ok = accessibilitySet.ok && projectionSet.ok && bootSet.ok
+            .edit()
+            .putBoolean(KEY_START_ON_BOOT_OPT, true)
+            .putString(KEY_UNATTENDED_ROOT_COMMAND, executor.command)
+            .putString(KEY_UNATTENDED_ROOT_STYLE, executor.style.name)
+            .apply()
+        val ok = storageSet.ok && screenSet.ok && accessibilitySet.ok && projectionSet.ok && bootSet.ok
         return mapOf(
             "status" to if (ok) "success" else "partial",
             "root_executor" to executor.command, "root_available" to true,
             "accessibility_ready" to InputService.isOpen,
-            "last_error" to if (ok) "" else if (!accessibilitySet.ok) "accessibility_enable_failed"
+            "last_error" to if (ok) "" else if (!storageSet.ok) "all_files_access_grant_failed"
+                else if (!screenSet.ok) "screen_wake_failed"
+                else if (!accessibilitySet.ok) "accessibility_enable_failed"
                 else if (!projectionSet.ok) "screen_capture_grant_failed" else "boot_permission_grant_failed"
         )
     }

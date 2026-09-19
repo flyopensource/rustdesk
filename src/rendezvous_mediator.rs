@@ -1,7 +1,7 @@
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant},
@@ -51,6 +51,8 @@ lazy_static::lazy_static! {
 static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 static MANUAL_RESTARTED: AtomicBool = AtomicBool::new(false);
 static SENT_REGISTER_PK: AtomicBool = AtomicBool::new(false);
+static MANAGED_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static MANAGED_PROFILE_ONLINE_GENERATION: AtomicU64 = AtomicU64::new(0);
 pub(crate) static NEEDS_DEPLOY: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "android")]
 static NOTIFIED_NEEDS_DEPLOY: AtomicBool = AtomicBool::new(false);
@@ -104,6 +106,7 @@ pub struct RendezvousMediator {
     host: String,
     host_prefix: String,
     keep_alive: i32,
+    managed_profile_generation: u64,
 }
 
 impl RendezvousMediator {
@@ -113,7 +116,24 @@ impl RendezvousMediator {
         log::info!("server restart");
     }
 
+    pub fn restart_for_managed_profile() -> u64 {
+        let generation = MANAGED_PROFILE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        Self::restart();
+        generation
+    }
+
+    pub fn managed_profile_is_online(generation: u64) -> bool {
+        generation > 0 && MANAGED_PROFILE_ONLINE_GENERATION.load(Ordering::SeqCst) >= generation
+    }
+
+    fn mark_managed_profile_online(&self) {
+        MANAGED_PROFILE_ONLINE_GENERATION
+            .fetch_max(self.managed_profile_generation, Ordering::SeqCst);
+    }
+
     pub async fn start_all() {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::desktop_provisioning::restore_confirmed_server_profile();
         crate::test_nat_type();
         if config::is_outgoing_only() {
             loop {
@@ -153,14 +173,21 @@ impl RendezvousMediator {
                 && !crate::platform::installing_service()
             {
                 let mut futs = Vec::new();
+                let managed_profile_generation = MANAGED_PROFILE_GENERATION.load(Ordering::SeqCst);
                 let servers = Config::get_rendezvous_servers();
                 SHOULD_EXIT.store(false, Ordering::SeqCst);
                 MANUAL_RESTARTED.store(false, Ordering::SeqCst);
+                if managed_profile_generation != MANAGED_PROFILE_GENERATION.load(Ordering::SeqCst) {
+                    SHOULD_EXIT.store(true, Ordering::SeqCst);
+                    continue;
+                }
                 for host in servers.clone() {
                     let server = server.clone();
                     let timeout = timeout.clone();
                     futs.push(tokio::spawn(async move {
-                        if let Err(err) = Self::start(server, host).await {
+                        if let Err(err) =
+                            Self::start(server, host, managed_profile_generation).await
+                        {
                             let err = format!("rendezvous mediator error: {err}");
                             // When user reboot, there might be below error, waiting too long
                             // (CONNECT_TIMEOUT 18s) will make user think there is bug
@@ -206,9 +233,15 @@ impl RendezvousMediator {
             .unwrap_or(host.to_owned())
     }
 
-    pub async fn start_udp(server: ServerPtr, host: String) -> ResultType<()> {
+    pub async fn start_udp(
+        server: ServerPtr,
+        host: String,
+        managed_profile_generation: u64,
+    ) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
-        if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+        if Config::desktop_managed_server_profile_active()
+            || (Config::has_hidden_server_profile() && !Config::is_manual_server_profile())
+        {
             log::info!("start udp with provisioned server");
         } else {
             log::info!("start udp: {host}");
@@ -219,6 +252,7 @@ impl RendezvousMediator {
             host: host.clone(),
             host_prefix: Self::get_host_prefix(&host),
             keep_alive: crate::DEFAULT_KEEP_ALIVE,
+            managed_profile_generation,
         };
 
         let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
@@ -258,8 +292,14 @@ impl RendezvousMediator {
                 }
                 if (latency - old_latency).abs() > n || old_latency <= 0 {
                     Config::update_latency(&host, latency);
-                    if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
-                        log::debug!("Latency of provisioned server: {}ms", latency as f64 / 1000.);
+                    if Config::desktop_managed_server_profile_active()
+                        || (Config::has_hidden_server_profile()
+                            && !Config::is_manual_server_profile())
+                    {
+                        log::debug!(
+                            "Latency of provisioned server: {}ms",
+                            latency as f64 / 1000.
+                        );
                     } else {
                         log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
                     }
@@ -345,6 +385,9 @@ impl RendezvousMediator {
         match msg {
             Some(rendezvous_message::Union::RegisterPeerResponse(rpr)) => {
                 update_latency();
+                if !rpr.request_pk {
+                    self.mark_managed_profile_online();
+                }
                 if rpr.request_pk {
                     log::info!("request_pk received from {}", self.host);
                     self.register_pk(sink).await?;
@@ -354,6 +397,7 @@ impl RendezvousMediator {
                 update_latency();
                 match rpr.result.enum_value() {
                     Ok(register_pk_response::Result::OK) => {
+                        self.mark_managed_profile_online();
                         Config::set_key_confirmed(true);
                         Config::set_host_key_confirmed(&self.host_prefix, true);
                         *SOLVING_PK_MISMATCH.lock().await = "".to_owned();
@@ -423,7 +467,11 @@ impl RendezvousMediator {
         Ok(())
     }
 
-    pub async fn start_tcp(server: ServerPtr, host: String) -> ResultType<()> {
+    pub async fn start_tcp(
+        server: ServerPtr,
+        host: String,
+        managed_profile_generation: u64,
+    ) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
         log::info!("start tcp: {}", hbb_common::websocket::check_ws(&host));
         let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
@@ -434,6 +482,7 @@ impl RendezvousMediator {
             host: host.clone(),
             host_prefix: Self::get_host_prefix(&host),
             keep_alive: crate::DEFAULT_KEEP_ALIVE,
+            managed_profile_generation,
         };
         let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
         let mut last_register_sent: Option<Instant> = None;
@@ -446,8 +495,13 @@ impl RendezvousMediator {
                     .map(|x| x.elapsed().as_micros() as i64)
                     .unwrap_or(0);
                 Config::update_latency(&host, latency);
-                if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
-                    log::debug!("Latency of provisioned server: {}ms", latency as f64 / 1000.);
+                if Config::desktop_managed_server_profile_active()
+                    || (Config::has_hidden_server_profile() && !Config::is_manual_server_profile())
+                {
+                    log::debug!(
+                        "Latency of provisioned server: {}ms",
+                        latency as f64 / 1000.
+                    );
                 } else {
                     log::debug!("Latency of {}: {}ms", host, latency as f64 / 1000.);
                 }
@@ -485,8 +539,14 @@ impl RendezvousMediator {
         Ok(())
     }
 
-    pub async fn start(server: ServerPtr, host: String) -> ResultType<()> {
-        if Config::has_hidden_server_profile() && !Config::is_manual_server_profile() {
+    pub async fn start(
+        server: ServerPtr,
+        host: String,
+        managed_profile_generation: u64,
+    ) -> ResultType<()> {
+        if Config::desktop_managed_server_profile_active()
+            || (Config::has_hidden_server_profile() && !Config::is_manual_server_profile())
+        {
             log::info!("start rendezvous mediator with provisioned server");
         } else {
             log::info!("start rendezvous mediator of {}", host);
@@ -497,9 +557,9 @@ impl RendezvousMediator {
             || use_ws()
             || crate::is_udp_disabled()
         {
-            Self::start_tcp(server, host).await
+            Self::start_tcp(server, host, managed_profile_generation).await
         } else {
-            Self::start_udp(server, host).await
+            Self::start_udp(server, host, managed_profile_generation).await
         }
     }
 

@@ -347,6 +347,8 @@ async fn start_hbbs_sync_async() {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if requires_device_auth {
                     v["password_status"] = crate::desktop_provisioning::password_status();
+                    v["server_profile_status"] =
+                        crate::desktop_provisioning::server_profile_status();
                 }
                 #[cfg(target_os = "android")]
                 let heartbeat_response = if requires_device_auth {

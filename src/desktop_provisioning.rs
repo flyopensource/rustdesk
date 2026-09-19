@@ -7,13 +7,15 @@ use hbb_common::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{convert::TryInto, path::Path};
+use std::{collections::HashMap, convert::TryInto, path::Path};
 
 const IDENTITY_FILE: &str = "desktop_management.toml";
 const ENVELOPE_VERSION: u32 = 1;
 const MAX_TOKEN_SIZE: u64 = 4096;
 const MAX_ENVELOPE_SIZE: usize = 256 * 1024;
 const MAX_PASSWORD_SIZE: usize = 255;
+const MAX_SERVER_FIELD_SIZE: usize = 255;
+const PROFILE_CONNECT_TIMEOUT_SECONDS: u64 = 30;
 
 lazy_static::lazy_static! {
     static ref IDENTITY_LOCK: std::sync::Mutex<()> = Default::default();
@@ -34,9 +36,24 @@ struct DesktopIdentity {
     policy_verify_key_id: String,
     policy_verify_public_key: String,
     policy_revision: i64,
+    password_revision: i64,
     password_status: String,
     permanent_password_set: bool,
     password_error: String,
+    profile_received_revision: i64,
+    profile_applied_revision: i64,
+    profile_failed_revision: i64,
+    profile_apply_status: String,
+    profile_active_source: String,
+    profile_error: String,
+    profile_attempt_count: u64,
+    profile_last_attempt_at: i64,
+    profile_fingerprint: String,
+    profile_candidate_envelope: String,
+    profile_confirmed_enabled: bool,
+    profile_confirmed_id_server: String,
+    profile_confirmed_relay_server: String,
+    profile_confirmed_key: String,
     enrollment_request_id: String,
     enrollment_token: String,
     enrollment_timestamp: i64,
@@ -84,10 +101,20 @@ struct UnattendedPolicy {
     permanent_password: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerProfilePolicy {
+    enabled: bool,
+    id_server: String,
+    relay_server: String,
+    key: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesktopPolicy {
     unattended: UnattendedPolicy,
+    server_profile: ServerProfilePolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +176,66 @@ fn validate_api_server(value: &str) -> ResultType<String> {
     let path = url.path().trim_end_matches('/').to_owned();
     url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_owned())
+}
+
+fn valid_server_field(value: &str, required: bool) -> bool {
+    (!required || !value.is_empty())
+        && value.len() <= MAX_SERVER_FIELD_SIZE
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
+fn validate_server_profile(profile: &ServerProfilePolicy) -> ResultType<()> {
+    if !profile.enabled {
+        if profile.id_server.is_empty() && profile.relay_server.is_empty() && profile.key.is_empty()
+        {
+            return Ok(());
+        }
+        bail!("profile_invalid")
+    }
+    if !valid_server_field(&profile.id_server, true)
+        || !valid_server_field(&profile.relay_server, false)
+        || !valid_server_field(&profile.key, false)
+    {
+        bail!("profile_invalid")
+    }
+    Ok(())
+}
+
+fn server_profile_options(profile: &ServerProfilePolicy) -> HashMap<String, String> {
+    HashMap::from([
+        (
+            hbb_common::config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_owned(),
+            profile.id_server.clone(),
+        ),
+        (
+            hbb_common::config::keys::OPTION_RELAY_SERVER.to_owned(),
+            profile.relay_server.clone(),
+        ),
+        (
+            hbb_common::config::keys::OPTION_KEY.to_owned(),
+            profile.key.clone(),
+        ),
+    ])
+}
+
+fn server_profile_fingerprint(profile: &ServerProfilePolicy) -> String {
+    let mut value = Vec::with_capacity(
+        profile.id_server.len() + profile.relay_server.len() + profile.key.len() + 3,
+    );
+    for field in [&profile.id_server, &profile.relay_server, &profile.key] {
+        append_field(&mut value, field);
+    }
+    hex::encode(&sha256::hash(&value).0[..16])
+}
+
+fn manual_fallback_source() -> String {
+    if Config::is_manual_server_profile() {
+        "manual_fallback".to_owned()
+    } else {
+        "none".to_owned()
+    }
 }
 
 fn append_field(message: &mut Vec<u8>, value: &str) {
@@ -445,11 +532,43 @@ pub fn password_status() -> Value {
         });
     };
     let identity = load_identity();
+    let applied_revision = if identity.password_revision > 0 {
+        identity.password_revision
+    } else {
+        identity.policy_revision
+    };
     json!({
-        "applied_revision": identity.policy_revision,
+        "applied_revision": applied_revision,
         "status": identity.password_status,
         "permanent_password_set": identity.permanent_password_set,
         "last_error": identity.password_error,
+    })
+}
+
+pub fn server_profile_status() -> Value {
+    let Ok(_guard) = IDENTITY_LOCK.lock() else {
+        return json!({
+            "received_revision": 0,
+            "applied_revision": 0,
+            "failed_revision": 0,
+            "apply_status": "failed",
+            "active_source": "none",
+            "connected": false,
+            "fingerprint": "",
+            "last_error": "desktop identity lock is poisoned",
+        });
+    };
+    let identity = load_identity();
+    json!({
+        "policy_revision": identity.profile_applied_revision,
+        "received_revision": identity.profile_received_revision,
+        "applied_revision": identity.profile_applied_revision,
+        "failed_revision": identity.profile_failed_revision,
+        "apply_status": identity.profile_apply_status,
+        "active_source": identity.profile_active_source,
+        "connected": hbb_common::config::get_online_state() > 0,
+        "fingerprint": identity.profile_fingerprint,
+        "last_error": identity.profile_error,
     })
 }
 
@@ -466,10 +585,33 @@ pub fn safe_status() -> Value {
         "device_id": identity.device_id,
         "policy_verify_key_id": identity.policy_verify_key_id,
         "policy_revision": identity.policy_revision,
+        "received_revision": identity.profile_received_revision,
+        "applied_revision": identity.profile_applied_revision,
+        "failed_revision": identity.profile_failed_revision,
+        "profile_apply_status": identity.profile_apply_status,
+        "profile_active_source": identity.profile_active_source,
+        "profile_connected": hbb_common::config::get_online_state() > 0,
+        "profile_error": identity.profile_error,
         "password_status": identity.password_status,
         "permanent_password_set": identity.permanent_password_set,
         "password_error": identity.password_error,
     })
+}
+
+pub fn retry_failed_server_profile() -> ResultType<bool> {
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+    let mut identity = load_identity();
+    if identity.device_id <= 0 || identity.profile_failed_revision <= 0 {
+        return Ok(false);
+    }
+    identity.policy_revision = identity.profile_failed_revision.saturating_sub(1);
+    identity.profile_failed_revision = 0;
+    identity.profile_apply_status = "idle".to_owned();
+    identity.profile_error.clear();
+    store_identity(&identity)?;
+    Ok(true)
 }
 
 pub fn cancel_pending_enrollment() -> ResultType<bool> {
@@ -610,7 +752,164 @@ fn decode_policy(encoded: &str, identity: &DesktopIdentity) -> ResultType<Policy
         "set" if !payload.desktop.unattended.permanent_password.is_empty() => {}
         _ => bail!("Invalid desktop password action"),
     }
+    validate_server_profile(&payload.desktop.server_profile)?;
     Ok(payload)
+}
+
+pub fn restore_confirmed_server_profile() {
+    let Ok(_guard) = IDENTITY_LOCK.lock() else {
+        return;
+    };
+    let identity = load_identity();
+    if identity.device_id <= 0
+        || !identity.profile_confirmed_enabled
+        || identity.profile_applied_revision <= 0
+    {
+        return;
+    }
+    let profile = ServerProfilePolicy {
+        enabled: true,
+        id_server: identity.profile_confirmed_id_server,
+        relay_server: identity.profile_confirmed_relay_server,
+        key: identity.profile_confirmed_key,
+    };
+    if let Err(error) = validate_server_profile(&profile) {
+        hbb_common::log::warn!("Failed to restore desktop managed profile: {error}");
+        return;
+    }
+    Config::set_desktop_managed_server_profile(server_profile_options(&profile));
+}
+
+fn restore_previous_server_profile(identity: &DesktopIdentity) {
+    if identity.profile_confirmed_enabled {
+        let previous = ServerProfilePolicy {
+            enabled: true,
+            id_server: identity.profile_confirmed_id_server.clone(),
+            relay_server: identity.profile_confirmed_relay_server.clone(),
+            key: identity.profile_confirmed_key.clone(),
+        };
+        Config::set_desktop_managed_server_profile(server_profile_options(&previous));
+    } else {
+        Config::clear_desktop_managed_server_profile();
+    }
+    crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+}
+
+async fn apply_server_profile(
+    profile: &ServerProfilePolicy,
+    revision: i64,
+    encoded: &str,
+) -> ResultType<()> {
+    let previous = {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        identity.profile_received_revision = revision;
+        identity.profile_apply_status = "applying".to_owned();
+        identity.profile_error.clear();
+        identity.profile_attempt_count = identity.profile_attempt_count.saturating_add(1);
+        identity.profile_last_attempt_at = hbb_common::get_time() / 1000;
+        identity.profile_candidate_envelope = encoded.to_owned();
+        store_identity(&identity)?;
+        identity
+    };
+
+    if !profile.enabled {
+        if Config::clear_desktop_managed_server_profile() {
+            crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+        }
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        identity.profile_applied_revision = revision;
+        identity.profile_failed_revision = 0;
+        identity.profile_apply_status = "disabled".to_owned();
+        identity.profile_active_source = manual_fallback_source();
+        identity.profile_error.clear();
+        identity.profile_fingerprint.clear();
+        identity.profile_candidate_envelope.clear();
+        identity.profile_confirmed_enabled = false;
+        identity.profile_confirmed_id_server.clear();
+        identity.profile_confirmed_relay_server.clear();
+        identity.profile_confirmed_key.clear();
+        store_identity(&identity)?;
+        return Ok(());
+    }
+
+    let unchanged = previous.profile_confirmed_enabled
+        && previous.profile_confirmed_id_server == profile.id_server
+        && previous.profile_confirmed_relay_server == profile.relay_server
+        && previous.profile_confirmed_key == profile.key
+        && Config::desktop_managed_server_profile_active();
+    if unchanged {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        identity.profile_applied_revision = revision;
+        identity.profile_failed_revision = 0;
+        identity.profile_apply_status = "success".to_owned();
+        identity.profile_active_source = "managed".to_owned();
+        identity.profile_error.clear();
+        identity.profile_fingerprint = server_profile_fingerprint(profile);
+        identity.profile_candidate_envelope.clear();
+        store_identity(&identity)?;
+        return Ok(());
+    }
+
+    Config::set_desktop_managed_server_profile(server_profile_options(profile));
+    let generation = crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+    let deadline = hbb_common::tokio::time::Instant::now()
+        + std::time::Duration::from_secs(PROFILE_CONNECT_TIMEOUT_SECONDS);
+    let connected = loop {
+        if crate::rendezvous_mediator::RendezvousMediator::managed_profile_is_online(generation)
+            && hbb_common::config::get_online_state() > 0
+        {
+            break true;
+        }
+        if hbb_common::tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        hbb_common::tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+
+    if connected {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        identity.profile_applied_revision = revision;
+        identity.profile_failed_revision = 0;
+        identity.profile_apply_status = "success".to_owned();
+        identity.profile_active_source = "managed".to_owned();
+        identity.profile_error.clear();
+        identity.profile_fingerprint = server_profile_fingerprint(profile);
+        identity.profile_candidate_envelope.clear();
+        identity.profile_confirmed_enabled = true;
+        identity.profile_confirmed_id_server = profile.id_server.clone();
+        identity.profile_confirmed_relay_server = profile.relay_server.clone();
+        identity.profile_confirmed_key = profile.key.clone();
+        store_identity(&identity)?;
+        return Ok(());
+    }
+
+    restore_previous_server_profile(&previous);
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+    let mut identity = load_identity();
+    identity.profile_failed_revision = revision;
+    identity.profile_apply_status = "rolled_back".to_owned();
+    identity.profile_active_source = if previous.profile_confirmed_enabled {
+        "managed".to_owned()
+    } else {
+        manual_fallback_source()
+    };
+    identity.profile_error = "profile_connect_timeout".to_owned();
+    store_identity(&identity)?;
+    Ok(())
 }
 
 fn record_policy_failure(error: &str) {
@@ -618,8 +917,13 @@ fn record_policy_failure(error: &str) {
         return;
     };
     let mut identity = load_identity();
-    identity.password_status = "failed".to_owned();
-    identity.password_error = error.chars().take(MAX_PASSWORD_SIZE).collect();
+    if error.starts_with("profile_") {
+        identity.profile_apply_status = "failed".to_owned();
+        identity.profile_error = error.chars().take(MAX_PASSWORD_SIZE).collect();
+    } else {
+        identity.password_status = "failed".to_owned();
+        identity.password_error = error.chars().take(MAX_PASSWORD_SIZE).collect();
+    }
     if let Err(store_error) = store_identity(&identity) {
         hbb_common::log::warn!("Failed to store desktop policy error: {store_error}");
     }
@@ -652,57 +956,73 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
     if payload.revision == current_revision {
         return Ok(current_revision);
     }
+    {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        identity.profile_received_revision = payload.revision;
+        store_identity(&identity)?;
+    }
     let action = payload.desktop.unattended.password_action.clone();
     if action == "unchanged" {
         let _guard = IDENTITY_LOCK
             .lock()
             .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
         let mut identity = load_identity();
-        identity.policy_revision = payload.revision;
+        identity.password_revision = payload.revision;
         identity.password_status = "unchanged".to_owned();
         identity.password_error.clear();
         store_identity(&identity)?;
-        return Ok(payload.revision);
-    }
-    {
+    } else {
+        {
+            let _guard = IDENTITY_LOCK
+                .lock()
+                .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+            let mut identity = load_identity();
+            identity.password_status = "applying".to_owned();
+            identity.password_error.clear();
+            store_identity(&identity)?;
+        }
+        let password = payload.desktop.unattended.permanent_password.clone();
+        let applied = match hbb_common::tokio::task::spawn_blocking(move || {
+            crate::ui_interface::set_permanent_password_with_result(password)
+        })
+        .await
+        {
+            Ok(applied) => applied,
+            Err(error) => {
+                let error = format!("Desktop password task failed: {error}");
+                record_policy_failure(&error);
+                bail!(error)
+            }
+        };
+        if !applied {
+            let error = "Desktop service rejected permanent password update";
+            record_policy_failure(error);
+            bail!(error)
+        }
         let _guard = IDENTITY_LOCK
             .lock()
             .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
         let mut identity = load_identity();
-        identity.password_status = "applying".to_owned();
+        identity.password_revision = payload.revision;
+        identity.password_status = if action == "clear" {
+            "cleared".to_owned()
+        } else {
+            "success".to_owned()
+        };
+        identity.permanent_password_set = action == "set";
         identity.password_error.clear();
         store_identity(&identity)?;
     }
-    let password = payload.desktop.unattended.permanent_password;
-    let applied = match hbb_common::tokio::task::spawn_blocking(move || {
-        crate::ui_interface::set_permanent_password_with_result(password)
-    })
-    .await
-    {
-        Ok(applied) => applied,
-        Err(error) => {
-            let error = format!("Desktop password task failed: {error}");
-            record_policy_failure(&error);
-            bail!(error)
-        }
-    };
-    if !applied {
-        let error = "Desktop service rejected permanent password update";
-        record_policy_failure(error);
-        bail!(error)
-    }
+
+    apply_server_profile(&payload.desktop.server_profile, payload.revision, encoded).await?;
     let _guard = IDENTITY_LOCK
         .lock()
         .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
     let mut identity = load_identity();
     identity.policy_revision = payload.revision;
-    identity.password_status = if action == "clear" {
-        "cleared".to_owned()
-    } else {
-        "success".to_owned()
-    };
-    identity.permanent_password_set = action == "set";
-    identity.password_error.clear();
     store_identity(&identity)?;
     Ok(payload.revision)
 }
@@ -710,7 +1030,8 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_enrollment_token, policy_signature_message, registration_message, PolicyEnvelope,
+        normalize_enrollment_token, policy_signature_message, registration_message,
+        server_profile_fingerprint, validate_server_profile, PolicyEnvelope, ServerProfilePolicy,
         MAX_TOKEN_SIZE,
     };
     use sha2::Digest;
@@ -735,6 +1056,30 @@ mod tests {
             hex::encode(sha2::Sha256::digest(message)),
             "d65d539941331f2eededeb5c0daf5da1ce3f0ab2bb7ebb4fc8573dbaf0946728"
         );
+    }
+
+    #[test]
+    fn desktop_server_profile_validation_rejects_unsafe_fields() {
+        let valid = ServerProfilePolicy {
+            enabled: true,
+            id_server: "id.example.com:21116".to_owned(),
+            relay_server: "relay.example.com:21117".to_owned(),
+            key: "server-key".to_owned(),
+        };
+        assert!(validate_server_profile(&valid).is_ok());
+        assert_eq!(server_profile_fingerprint(&valid).len(), 32);
+
+        let mut invalid = valid.clone();
+        invalid.id_server = "id.example.com bad".to_owned();
+        assert!(validate_server_profile(&invalid).is_err());
+
+        let invalid_disabled = ServerProfilePolicy {
+            enabled: false,
+            id_server: "id.example.com".to_owned(),
+            relay_server: String::new(),
+            key: String::new(),
+        };
+        assert!(validate_server_profile(&invalid_disabled).is_err());
     }
 
     #[test]

@@ -1202,6 +1202,20 @@ pub fn main_cancel_pending_desktop_enrollment() -> String {
     }
 }
 
+pub fn main_retry_failed_desktop_profile() -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::retry_failed_server_profile()
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
 pub fn main_check_connect_status() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_option_status_sync(); // avoid multi calls
@@ -2950,8 +2964,7 @@ pub fn main_set_common(_key: String, _value: String) {
 
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
-        if key == "continue-insecure-connection"
-        {
+        if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
             return;
         }

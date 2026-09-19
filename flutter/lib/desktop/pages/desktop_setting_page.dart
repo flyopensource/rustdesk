@@ -483,7 +483,10 @@ class _GeneralState extends State<_General> {
     final incomingOnly = bind.isIncomingOnly();
     final outgoingOnly = bind.isOutgoingOnly();
     final showAutoUpdate = (isWindows && bind.mainIsInstalled()) ||
-    (isMacOS && bind.mainIsInstalled() && bind.mainIsInstalledDaemon(prompt: false) && !bind.isCustomClient());
+        (isMacOS &&
+            bind.mainIsInstalled() &&
+            bind.mainIsInstalledDaemon(prompt: false) &&
+            !bind.isCustomClient());
     final children = <Widget>[
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -945,6 +948,20 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     await refresh();
   }
 
+  Future<void> retryFailedProfile() async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final result = await bind.mainRetryFailedDesktopProfile();
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      error = result;
+    });
+    await refresh();
+  }
+
   Widget statusRow(String label, String value) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -971,11 +988,34 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     return '$label / $passwordSet';
   }
 
+  String profileStatus() {
+    final raw = status['profile_apply_status']?.toString() ?? '';
+    return switch (raw) {
+      'success' => translate('Successful'),
+      'rolled_back' => translate('Failed'),
+      'failed' => translate('Failed'),
+      'applying' => translate('Apply'),
+      'disabled' => translate('Disabled'),
+      _ => translate('Not ready'),
+    };
+  }
+
+  String profileError(String value) {
+    return switch (value) {
+      'profile_connect_timeout' =>
+        translate('Failed to connect to rendezvous server'),
+      'profile_invalid' => translate('Invalid ID'),
+      _ => value,
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final enrolled = status['enrolled'] == true;
     final pending = status['pending'] == true;
     final passwordError = status['password_error']?.toString() ?? '';
+    final managedProfileError = status['profile_error']?.toString() ?? '';
+    final failedRevision = status['failed_revision'] as int? ?? 0;
     return _Card(
       title: 'Managed by administrator',
       children: [
@@ -985,7 +1025,18 @@ class _DesktopManagementState extends State<_DesktopManagement> {
           statusRow('ID', status['rustdesk_id']?.toString() ?? ''),
           statusRow(
               'Policy revision', status['policy_revision']?.toString() ?? '0'),
+          statusRow('Server',
+              '${profileStatus()} / ${status['profile_active_source'] ?? '-'}'),
+          statusRow(
+              'Connection',
+              translate(status['profile_connected'] == true
+                  ? 'Connected'
+                  : 'Disconnected')),
+          statusRow('Version',
+              '${status['received_revision'] ?? 0}/${status['applied_revision'] ?? 0}/$failedRevision'),
           statusRow('Password', passwordStatus()),
+          if (managedProfileError.isNotEmpty)
+            statusRow('Error', profileError(managedProfileError)),
           if (passwordError.isNotEmpty) statusRow('Error', passwordError),
         ] else ...[
           _LabeledTextField(
@@ -1009,6 +1060,11 @@ class _DesktopManagementState extends State<_DesktopManagement> {
                 onPressed: busy ? null : cancelPending,
                 child: Text(translate('Cancel')),
               ).marginOnly(left: 8),
+            if (enrolled && failedRevision > 0)
+              ElevatedButton(
+                onPressed: busy ? null : retryFailedProfile,
+                child: Text(translate('Retry')),
+              ).marginOnly(right: 8),
             ElevatedButton(
               onPressed: busy ? null : refresh,
               child: Text(translate('Refresh')),

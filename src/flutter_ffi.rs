@@ -1161,6 +1161,47 @@ pub fn main_get_server_profile_status() -> String {
     }
 }
 
+pub fn main_get_desktop_management_status() -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        serde_json::to_string(&crate::desktop_provisioning::safe_status())
+            .unwrap_or_else(|error| serde_json::json!({ "error": error.to_string() }).to_string())
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        "{}".to_owned()
+    }
+}
+
+pub fn main_enroll_desktop(api_server: String, token: String) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::enroll(&api_server, &token)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (api_server, token);
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
+pub fn main_cancel_pending_desktop_enrollment() -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::cancel_pending_enrollment()
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
 pub fn main_check_connect_status() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_option_status_sync(); // avoid multi calls

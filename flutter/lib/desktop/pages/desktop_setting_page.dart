@@ -866,6 +866,166 @@ class _GeneralState extends State<_General> {
   }
 }
 
+class _DesktopManagement extends StatefulWidget {
+  const _DesktopManagement();
+
+  @override
+  State<_DesktopManagement> createState() => _DesktopManagementState();
+}
+
+class _DesktopManagementState extends State<_DesktopManagement> {
+  final apiServerController = TextEditingController();
+  final tokenController = TextEditingController();
+  Map<String, dynamic> status = const {};
+  String error = '';
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    refresh();
+  }
+
+  @override
+  void dispose() {
+    apiServerController.dispose();
+    tokenController.dispose();
+    super.dispose();
+  }
+
+  Future<void> refresh() async {
+    try {
+      final value = jsonDecode(await bind.mainGetDesktopManagementStatus());
+      if (!mounted || value is! Map<String, dynamic>) return;
+      setState(() {
+        status = value;
+        final apiServer = value['api_server'];
+        if (apiServerController.text.isEmpty && apiServer is String) {
+          apiServerController.text = apiServer;
+        }
+      });
+    } catch (e) {
+      if (mounted) setState(() => error = e.toString());
+    }
+  }
+
+  Future<void> enroll() async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final result = await bind.mainEnrollDesktop(
+      apiServer: apiServerController.text.trim(),
+      token: tokenController.text.trim(),
+    );
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      error = result;
+      if (result.isEmpty) tokenController.clear();
+    });
+    await refresh();
+  }
+
+  Future<void> cancelPending() async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final result = await bind.mainCancelPendingDesktopEnrollment();
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      error = result;
+      if (result.isEmpty) {
+        tokenController.clear();
+        status = const {};
+      }
+    });
+    await refresh();
+  }
+
+  Widget statusRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(width: 150, child: Text('${translate(label)}:')),
+        Expanded(child: SelectableText(value.isEmpty ? '-' : value)),
+      ],
+    ).marginOnly(left: _kContentHMargin);
+  }
+
+  String passwordStatus() {
+    final raw = status['password_status']?.toString() ?? '';
+    final label = switch (raw) {
+      'success' => translate('Successful'),
+      'failed' => translate('Failed'),
+      'applying' => translate('Apply'),
+      'cleared' => translate('Clear'),
+      'unchanged' => translate('Ready'),
+      _ => translate('Not ready'),
+    };
+    final passwordSet = status['permanent_password_set'] == true
+        ? translate('Ready')
+        : translate('Not ready');
+    return '$label / $passwordSet';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enrolled = status['enrolled'] == true;
+    final pending = status['pending'] == true;
+    final passwordError = status['password_error']?.toString() ?? '';
+    return _Card(
+      title: 'Managed by administrator',
+      children: [
+        statusRow('Status', translate(enrolled ? 'Ready' : 'Not ready')),
+        if (enrolled) ...[
+          statusRow('API Server', status['api_server']?.toString() ?? ''),
+          statusRow('ID', status['rustdesk_id']?.toString() ?? ''),
+          statusRow(
+              'Policy revision', status['policy_revision']?.toString() ?? '0'),
+          statusRow('Password', passwordStatus()),
+          if (passwordError.isNotEmpty) statusRow('Error', passwordError),
+        ] else ...[
+          _LabeledTextField(
+              context, 'API Server', apiServerController, '', !busy, false),
+          _LabeledTextField(
+              context, 'API Token', tokenController, '', !busy, true),
+        ],
+        if (error.isNotEmpty)
+          Text(error,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error))
+              .marginOnly(left: _kContentHMargin),
+        Row(
+          children: [
+            if (!enrolled)
+              ElevatedButton(
+                onPressed: busy ? null : enroll,
+                child: Text(translate(pending ? 'Retry' : 'Apply')),
+              ),
+            if (pending)
+              ElevatedButton(
+                onPressed: busy ? null : cancelPending,
+                child: Text(translate('Cancel')),
+              ).marginOnly(left: 8),
+            ElevatedButton(
+              onPressed: busy ? null : refresh,
+              child: Text(translate('Refresh')),
+            ).marginOnly(left: enrolled ? 0 : 8),
+            if (busy)
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ).marginOnly(left: 10),
+          ],
+        ).marginOnly(left: _kContentHMargin),
+      ],
+    );
+  }
+}
+
 enum _AccessMode {
   custom,
   full,
@@ -896,6 +1056,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               locked = false;
               setState(() => {});
             }),
+            if (!isWeb) const _DesktopManagement(),
             preventMouseKeyBuilder(
               block: locked,
               child: Column(children: [

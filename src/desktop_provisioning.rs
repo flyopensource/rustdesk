@@ -206,7 +206,6 @@ fn policy_signature_message(envelope: &PolicyEnvelope, ciphertext: &[u8]) -> Vec
 }
 
 pub fn enroll_from_file(api_server: &str, token_file: &Path) -> ResultType<()> {
-    let api_server = validate_api_server(api_server)?;
     let metadata = std::fs::metadata(token_file).context("Failed to read enrollment token file")?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TOKEN_SIZE {
         bail!("Invalid enrollment token file")
@@ -215,9 +214,20 @@ pub fn enroll_from_file(api_server: &str, token_file: &Path) -> ResultType<()> {
         .context("Failed to read enrollment token file")?
         .trim()
         .to_owned();
-    if token.is_empty() {
-        bail!("Enrollment token is empty")
+    enroll(api_server, &token)
+}
+
+fn normalize_enrollment_token(token: &str) -> ResultType<String> {
+    let token = token.trim();
+    if token.is_empty() || token.len() as u64 > MAX_TOKEN_SIZE {
+        bail!("Invalid enrollment token")
     }
+    Ok(token.to_owned())
+}
+
+pub fn enroll(api_server: &str, token: &str) -> ResultType<()> {
+    let api_server = validate_api_server(api_server)?;
+    let token = normalize_enrollment_token(token)?;
     let _guard = IDENTITY_LOCK
         .lock()
         .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
@@ -450,6 +460,7 @@ pub fn safe_status() -> Value {
     let identity = load_identity();
     json!({
         "enrolled": identity.device_id > 0,
+        "pending": identity.device_id <= 0 && !identity.enrollment_request_id.is_empty(),
         "api_server": identity.api_server,
         "rustdesk_id": identity.rustdesk_id,
         "device_id": identity.device_id,
@@ -459,6 +470,24 @@ pub fn safe_status() -> Value {
         "permanent_password_set": identity.permanent_password_set,
         "password_error": identity.password_error,
     })
+}
+
+pub fn cancel_pending_enrollment() -> ResultType<bool> {
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+    let identity = load_identity();
+    if identity.device_id > 0 {
+        bail!("Desktop is already enrolled")
+    }
+    if identity.enrollment_request_id.is_empty() {
+        return Ok(false);
+    }
+    let path = identity_path();
+    if path.exists() {
+        std::fs::remove_file(path).context("Failed to clear pending desktop enrollment")?;
+    }
+    Ok(true)
 }
 
 fn device_request_message(device_id: i64, sequence: i64, payload: &[u8]) -> Vec<u8> {
@@ -680,7 +709,10 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
 
 #[cfg(test)]
 mod tests {
-    use super::{policy_signature_message, registration_message, PolicyEnvelope};
+    use super::{
+        normalize_enrollment_token, policy_signature_message, registration_message, PolicyEnvelope,
+        MAX_TOKEN_SIZE,
+    };
     use sha2::Digest;
 
     #[test]
@@ -720,5 +752,15 @@ mod tests {
         let mut changed = envelope;
         changed.revision += 1;
         assert_ne!(first, policy_signature_message(&changed, &[3; 48]));
+    }
+
+    #[test]
+    fn desktop_enrollment_token_is_trimmed_and_bounded() {
+        assert_eq!(
+            normalize_enrollment_token("  rud1.selector.secret\n").unwrap(),
+            "rud1.selector.secret"
+        );
+        assert!(normalize_enrollment_token("  ").is_err());
+        assert!(normalize_enrollment_token(&"x".repeat(MAX_TOKEN_SIZE as usize + 1)).is_err());
     }
 }

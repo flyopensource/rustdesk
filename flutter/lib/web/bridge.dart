@@ -856,6 +856,19 @@ class RustdeskImpl {
         () => js.context.callMethod('getByName', ["get_conn_status"]));
   }
 
+  Future<String> mainGetDesktopManagementStatus({dynamic hint}) {
+    return Future.value('{}');
+  }
+
+  Future<String> mainEnrollDesktop(
+      {required String apiServer, required String token, dynamic hint}) {
+    return Future.value('Desktop management is unavailable');
+  }
+
+  Future<String> mainCancelPendingDesktopEnrollment({dynamic hint}) {
+    return Future.value('Desktop management is unavailable');
+  }
+
   Future<void> mainCheckConnectStatus({dynamic hint}) {
     throw UnimplementedError("mainCheckConnectStatus");
   }

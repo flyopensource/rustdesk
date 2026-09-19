@@ -100,6 +100,8 @@ async fn start_hbbs_sync_async() {
     let mut sysinfo_ver = "".to_owned();
     #[cfg(target_os = "android")]
     let mut device_auth: Option<DeviceAuthState> = None;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let mut device_auth: Option<crate::desktop_provisioning::DeviceAuthState> = None;
     loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -121,6 +123,21 @@ async fn start_hbbs_sync_async() {
                         .unwrap_or(true);
                     if needs_registration {
                         device_auth = register_device(api_server, &id).await;
+                    }
+                    if device_auth.is_none() {
+                        *PRO.lock().unwrap() = false;
+                        continue;
+                    }
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if requires_device_auth {
+                    let api_server = url.trim_end_matches("/api/device/heartbeat");
+                    let needs_identity = device_auth
+                        .as_ref()
+                        .map(|state| state.api_server != api_server || state.rustdesk_id != id)
+                        .unwrap_or(true);
+                    if needs_identity {
+                        device_auth = crate::desktop_provisioning::auth_state(&id);
                     }
                     if device_auth.is_none() {
                         *PRO.lock().unwrap() = false;
@@ -247,7 +264,20 @@ async fn start_hbbs_sync_async() {
                         crate::post_request(url.replace("heartbeat", "sysinfo"), v, "").await
                     };
                     #[cfg(not(target_os = "android"))]
-                    let sysinfo_response = crate::post_request(url.replace("heartbeat", "sysinfo"), v, "").await;
+                    let sysinfo_response = if requires_device_auth {
+                        let Some(state) = device_auth.as_ref() else {
+                            continue;
+                        };
+                        crate::desktop_provisioning::signed_post(
+                            url.replace("heartbeat", "sysinfo"),
+                            v,
+                            state,
+                        )
+                        .await
+                        .map(|(_, body)| body)
+                    } else {
+                        crate::post_request(url.replace("heartbeat", "sysinfo"), v, "").await
+                    };
                     match sysinfo_response {
                         Ok(x)  => {
                             if x == "SYSINFO_UPDATED" {
@@ -280,7 +310,14 @@ async fn start_hbbs_sync_async() {
                 if !conns.is_empty() {
                     v["conns"] = json!(conns);
                 }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                let modified_at = if requires_device_auth {
+                    crate::desktop_provisioning::policy_revision()
+                } else {
+                    LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0)
+                };
                 v["modified_at"] = json!(modified_at);
                 #[cfg(target_os = "android")]
                 if requires_device_auth {
@@ -307,6 +344,10 @@ async fn start_hbbs_sync_async() {
                         "connected": hbb_common::config::get_online_state() > 0,
                     });
                 }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if requires_device_auth {
+                    v["password_status"] = crate::desktop_provisioning::password_status();
+                }
                 #[cfg(target_os = "android")]
                 let heartbeat_response = if requires_device_auth {
                     let Some(state) = device_auth.as_mut() else {
@@ -322,7 +363,14 @@ async fn start_hbbs_sync_async() {
                     crate::post_request_with_status(url.clone(), v.to_string(), "").await
                 };
                 #[cfg(not(target_os = "android"))]
-                let heartbeat_response = crate::post_request_with_status(url.clone(), v.to_string(), "").await;
+                let heartbeat_response = if requires_device_auth {
+                    let Some(state) = device_auth.as_ref() else {
+                        continue;
+                    };
+                    crate::desktop_provisioning::signed_post(url.clone(), v.to_string(), state).await
+                } else {
+                    crate::post_request_with_status(url.clone(), v.to_string(), "").await
+                };
                 if let Ok((status, s)) = heartbeat_response {
                     #[cfg(target_os = "android")]
                     if requires_device_auth && matches!(status, 401 | 409) {
@@ -360,6 +408,16 @@ async fn start_hbbs_sync_async() {
                                         }
                                     }
                                 }
+                                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                                if requires_device_auth {
+                                    if let Some(envelope) = strategy.extra.remove("desktop_provisioning") {
+                                        let uuid = crate::encode64(hbb_common::get_uuid());
+                                        match crate::desktop_provisioning::apply_policy(&envelope, &id, &uuid).await {
+                                            Ok(_) => policy_applied = true,
+                                            Err(error) => log::warn!("Desktop policy rejected: {}", error),
+                                        }
+                                    }
+                                }
                                 log::info!("strategy updated");
                                 handle_config_options(strategy.config_options);
                             }
@@ -368,7 +426,7 @@ async fn start_hbbs_sync_async() {
                             #[cfg(target_os = "android")]
                             let can_store_revision = !requires_device_auth || revision == modified_at || policy_applied;
                             #[cfg(not(target_os = "android"))]
-                            let can_store_revision = true;
+                            let can_store_revision = !requires_device_auth || revision == modified_at || policy_applied;
                             if can_store_revision && revision != modified_at {
                                 LocalConfig::set_option("strategy_timestamp".to_string(), revision.to_string());
                             }
@@ -388,6 +446,14 @@ async fn heartbeat_target() -> (String, bool) {
             return (String::new(), true);
         }
         return (format!("{}/api/device/heartbeat", server), true);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let id = Config::get_id();
+        let server = crate::desktop_provisioning::api_server(&id);
+        if !server.is_empty() {
+            return (format!("{}/api/device/heartbeat", server), true);
+        }
     }
     let url = crate::common::get_api_server(
         Config::get_option("api-server"),

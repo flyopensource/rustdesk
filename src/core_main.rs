@@ -433,6 +433,25 @@ pub fn core_main() -> Option<Vec<String>> {
                 import_config(&filepath);
             }
             return None;
+        } else if args[0] == "--desktop-enroll-file" {
+            if args.len() != 3 {
+                println!("Usage: --desktop-enroll-file <api-url> <token-file>");
+            } else {
+                match crate::desktop_provisioning::enroll_from_file(
+                    &args[1],
+                    std::path::Path::new(&args[2]),
+                ) {
+                    Ok(()) => println!("Desktop enrollment completed."),
+                    Err(error) => println!("Desktop enrollment failed: {error}"),
+                }
+            }
+            return None;
+        } else if args[0] == "--desktop-management-status" {
+            match serde_json::to_string_pretty(&crate::desktop_provisioning::safe_status()) {
+                Ok(status) => println!("{status}"),
+                Err(error) => println!("Failed to serialize desktop management status: {error}"),
+            }
+            return None;
         } else if args[0] == "--password" {
             if is_cli_setting_change_disabled() {
                 println!("Settings are disabled!");

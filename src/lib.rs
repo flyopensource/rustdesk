@@ -39,6 +39,8 @@ use common::*;
 mod auth_2fa;
 #[cfg(target_os = "android")]
 mod android_provisioning;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod desktop_provisioning;
 #[cfg(not(target_os = "ios"))]
 mod clipboard;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

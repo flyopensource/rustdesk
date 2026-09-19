@@ -102,6 +102,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _disableUdp = false;
   var _enableIpv6Punch = false;
   var _isUsingPublicServer = false;
+  ServerProfileStatus? _serverProfileStatus;
   var _allowAskForNoteAtEndOfConnection = false;
   var _preventSleepWhileConnected = true;
 
@@ -232,6 +233,13 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         _isUsingPublicServer = isUsingPublicServer;
       }
 
+      final serverProfileStatus = await getServerProfileStatus();
+      if (!mounted) return;
+      if (serverProfileStatus != null) {
+        update = true;
+        _serverProfileStatus = serverProfileStatus;
+      }
+
       if (update) {
         setState(() {});
       }
@@ -250,7 +258,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       () async {
         final ibs = await checkAndUpdateIgnoreBatteryStatus();
         final sob = await checkAndUpdateStartOnBoot();
-        if (ibs || sob) {
+        final serverProfileStatus = await getServerProfileStatus();
+        if (!mounted) return;
+        if (serverProfileStatus != null) {
+          _serverProfileStatus = serverProfileStatus;
+        }
+        if (ibs || sob || serverProfileStatus != null) {
           setState(() {});
         }
       }();
@@ -285,6 +298,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     Provider.of<FfiModel>(context);
     final outgoingOnly = bind.isOutgoingOnly();
     final incomingOnly = bind.isIncomingOnly();
+    final managedServerProfile =
+        _serverProfileStatus?.isManaged == true ? _serverProfileStatus : null;
     final customClientSection = CustomSettingsSection(
         child: Column(
       children: [
@@ -747,12 +762,28 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           if (!disabledSettings && !_hideNetwork && !_hideServer)
             SettingsTile(
                 title: Text(translate('ID/Relay Server')),
+                description: managedServerProfile == null
+                    ? null
+                    : AnimatedBuilder(
+                        animation: gFFI.serverModel,
+                        builder: (context, child) => Text(
+                          '${translate('Managed by administrator')} · ${serverProfileConnectionLabel(managedServerProfile, statusNum: gFFI.serverModel.connectStatus)}',
+                        ),
+                      ),
                 leading: Icon(Icons.cloud),
-                onPressed: (context) {
+                onPressed: (context) async {
+                  final serverProfileStatus = await getServerProfileStatus();
+                  if (!mounted) return;
+                  if (serverProfileStatus != null) {
+                    setState(() {
+                      _serverProfileStatus = serverProfileStatus;
+                    });
+                  }
                   showServerSettings(gFFI.dialogManager, (callback) async {
                     _isUsingPublicServer = await bind.mainIsUsingPublicServer();
+                    if (!mounted) return;
                     setState(callback);
-                  });
+                  }, serverProfileStatus: serverProfileStatus);
                 }),
           if (!_hideNetwork && !_hideProxy)
             SettingsTile(

@@ -763,5 +763,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Lock canvas", "Κλείδωμα καμβά"),
         ("Sync clipboard between sessions", "Συγχρονισμός προχείρου μεταξύ συνεδριών"),
         ("sync-clipboard-between-sessions-tip", "Κείμενο ή εικόνες που αντιγράφονται σε μία απομακρυσμένη συνεδρία αποστέλλονται και στο πρόχειρο των άλλων συνδεδεμένων συνεδριών σας."),
+        ("Managed by administrator", ""),
+        ("Not ready", ""),
+        ("Policy revision", ""),
     ].iter().cloned().collect();
 }

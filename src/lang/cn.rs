@@ -763,5 +763,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Lock canvas", "锁定画布"),
         ("Sync clipboard between sessions", "在会话间同步剪贴板"),
         ("sync-clipboard-between-sessions-tip", "在一个远程会话中复制的文本或图片也会发送到其他已连接会话的剪贴板。"),
+        ("Managed by administrator", "由后台下发"),
+        ("Not ready", "未就绪"),
+        ("Policy revision", "策略版本"),
     ].iter().cloned().collect();
 }

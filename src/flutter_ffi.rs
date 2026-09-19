@@ -1132,6 +1132,35 @@ pub fn main_get_connect_status() -> String {
     }
 }
 
+pub fn main_get_server_profile_status() -> String {
+    #[cfg(target_os = "android")]
+    {
+        let mut status_num = hbb_common::config::get_online_state();
+        if status_num > 0 {
+            status_num = 1;
+        }
+        serde_json::json!({
+            "source": crate::android_provisioning::server_profile_source(),
+            "status_num": status_num,
+            "id_server": config::Config::get_effective_server_option(
+                config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
+            ),
+            "relay_server": config::Config::get_effective_server_option(
+                config::keys::OPTION_RELAY_SERVER,
+            ),
+            "api_server": get_api_server(),
+            "revision": LocalConfig::get_option(
+                crate::android_provisioning::POLICY_REVISION_OPTION,
+            ),
+        })
+        .to_string()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "{}".to_owned()
+    }
+}
+
 pub fn main_check_connect_status() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_option_status_sync(); // avoid multi calls

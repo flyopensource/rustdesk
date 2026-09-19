@@ -8,6 +8,58 @@ import 'package:get/get.dart';
 import '../../common.dart';
 import '../../models/platform_model.dart';
 
+class ServerProfileStatus {
+  final String source;
+  final int statusNum;
+  final String idServer;
+  final String relayServer;
+  final String apiServer;
+  final String revision;
+
+  const ServerProfileStatus({
+    required this.source,
+    required this.statusNum,
+    required this.idServer,
+    required this.relayServer,
+    required this.apiServer,
+    required this.revision,
+  });
+
+  bool get isManaged => source == 'provisioned' || source == 'waiting';
+
+  factory ServerProfileStatus.fromJson(String value) {
+    final json = jsonDecode(value) as Map<String, dynamic>;
+    return ServerProfileStatus(
+      source: json['source'] as String? ?? 'public',
+      statusNum: json['status_num'] as int? ?? 0,
+      idServer: json['id_server'] as String? ?? '',
+      relayServer: json['relay_server'] as String? ?? '',
+      apiServer: json['api_server'] as String? ?? '',
+      revision: json['revision'] as String? ?? '',
+    );
+  }
+}
+
+Future<ServerProfileStatus?> getServerProfileStatus() async {
+  if (!isAndroid) return null;
+  try {
+    return ServerProfileStatus.fromJson(
+        await bind.mainGetServerProfileStatus());
+  } catch (e) {
+    debugPrint('Invalid server profile status: $e');
+    return null;
+  }
+}
+
+String serverProfileConnectionLabel(ServerProfileStatus status,
+    {int? statusNum}) {
+  if (status.source == 'waiting') return translate('Waiting');
+  statusNum ??= status.statusNum;
+  if (statusNum > 0) return translate('Ready');
+  if (statusNum == 0) return translate('Connecting...');
+  return translate('Not ready');
+}
+
 void _showSuccess() {
   showToast(translate("Successful"));
 }
@@ -53,8 +105,14 @@ void setTemporaryPasswordLengthDialog(
   }, backDismiss: true, clickMaskDismiss: true);
 }
 
-void showServerSettings(OverlayDialogManager dialogManager,
-    void Function(VoidCallback) setState) async {
+void showServerSettings(
+    OverlayDialogManager dialogManager, void Function(VoidCallback) setState,
+    {ServerProfileStatus? serverProfileStatus}) async {
+  serverProfileStatus ??= await getServerProfileStatus();
+  if (serverProfileStatus?.isManaged == true) {
+    _showManagedServerSettings(dialogManager, serverProfileStatus!);
+    return;
+  }
   Map<String, dynamic> options = {};
   try {
     options = jsonDecode(await bind.mainGetOptions());
@@ -63,6 +121,52 @@ void showServerSettings(OverlayDialogManager dialogManager,
   }
   showServerSettingsWithValue(
       ServerConfig.fromOptions(options), dialogManager, setState);
+}
+
+void _showManagedServerSettings(
+    OverlayDialogManager dialogManager, ServerProfileStatus status) {
+  Widget valueRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          SelectableText(value.isEmpty ? '-' : value),
+        ],
+      ),
+    );
+  }
+
+  dialogManager.show((setState, close, context) {
+    return CustomAlertDialog(
+      title: Text(translate('ID/Relay Server')),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 280, maxWidth: 500),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${translate('Managed by administrator')} · ${translate('Read-only')}',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 8),
+            Text(serverProfileConnectionLabel(status)),
+            valueRow(translate('ID Server'), status.idServer),
+            valueRow(translate('Relay Server'), status.relayServer),
+            valueRow(translate('API Server'), status.apiServer),
+            if (status.revision.isNotEmpty)
+              valueRow(translate('Policy revision'), status.revision),
+          ],
+        ),
+      ),
+      actions: [
+        dialogButton('Close', onPressed: close),
+      ],
+    );
+  });
 }
 
 void showServerSettingsWithValue(

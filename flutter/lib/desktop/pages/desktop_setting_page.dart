@@ -877,7 +877,6 @@ class _DesktopManagement extends StatefulWidget {
 }
 
 class _DesktopManagementState extends State<_DesktopManagement> {
-  final apiServerController = TextEditingController();
   final tokenController = TextEditingController();
   Map<String, dynamic> status = const {};
   String error = '';
@@ -891,7 +890,6 @@ class _DesktopManagementState extends State<_DesktopManagement> {
 
   @override
   void dispose() {
-    apiServerController.dispose();
     tokenController.dispose();
     super.dispose();
   }
@@ -902,10 +900,6 @@ class _DesktopManagementState extends State<_DesktopManagement> {
       if (!mounted || value is! Map<String, dynamic>) return;
       setState(() {
         status = value;
-        final apiServer = value['api_server'];
-        if (apiServerController.text.isEmpty && apiServer is String) {
-          apiServerController.text = apiServer;
-        }
       });
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
@@ -918,7 +912,7 @@ class _DesktopManagementState extends State<_DesktopManagement> {
       error = '';
     });
     final result = await bind.mainEnrollDesktop(
-      apiServer: apiServerController.text.trim(),
+      apiServer: '',
       token: tokenController.text.trim(),
     );
     if (!mounted) return;
@@ -1039,8 +1033,6 @@ class _DesktopManagementState extends State<_DesktopManagement> {
             statusRow('Error', profileError(managedProfileError)),
           if (passwordError.isNotEmpty) statusRow('Error', passwordError),
         ] else ...[
-          _LabeledTextField(
-              context, 'API Server', apiServerController, '', !busy, false),
           _LabeledTextField(
               context, 'API Token', tokenController, '', !busy, true),
         ],

@@ -1173,17 +1173,17 @@ pub fn main_get_desktop_management_status() -> String {
     }
 }
 
-pub fn main_enroll_desktop(api_server: String, token: String) -> String {
+pub fn main_enroll_desktop(_api_server: String, token: String) -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        crate::desktop_provisioning::enroll(&api_server, &token)
+        crate::desktop_provisioning::enroll(&token)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default()
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let _ = (api_server, token);
+        let _ = token;
         "Desktop management is unavailable".to_owned()
     }
 }

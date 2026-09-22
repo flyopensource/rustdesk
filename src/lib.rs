@@ -39,6 +39,8 @@ use common::*;
 mod auth_2fa;
 #[cfg(target_os = "android")]
 mod android_provisioning;
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+mod desktop_enrollment_token;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod desktop_provisioning;
 #[cfg(not(target_os = "ios"))]

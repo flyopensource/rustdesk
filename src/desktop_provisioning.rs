@@ -154,30 +154,6 @@ fn decode_fixed<const N: usize>(value: &str, label: &str) -> ResultType<[u8; N]>
         .map_err(|_| anyhow!("Invalid desktop {label} length"))
 }
 
-fn validate_api_server(value: &str) -> ResultType<String> {
-    let mut url = reqwest::Url::parse(value).context("Invalid desktop management API URL")?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        bail!("Invalid desktop management API URL")
-    }
-    let loopback_http = url.scheme() == "http"
-        && url
-            .host_str()
-            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-            .map(|address| address.is_loopback())
-            .unwrap_or_else(|| url.host_str() == Some("localhost"));
-    if url.scheme() != "https" && !loopback_http {
-        bail!("Desktop management API requires HTTPS")
-    }
-    let path = url.path().trim_end_matches('/').to_owned();
-    url.set_path(&path);
-    Ok(url.to_string().trim_end_matches('/').to_owned())
-}
-
 fn valid_server_field(value: &str, required: bool) -> bool {
     (!required || !value.is_empty())
         && value.len() <= MAX_SERVER_FIELD_SIZE
@@ -292,7 +268,7 @@ fn policy_signature_message(envelope: &PolicyEnvelope, ciphertext: &[u8]) -> Vec
     message
 }
 
-pub fn enroll_from_file(api_server: &str, token_file: &Path) -> ResultType<()> {
+pub fn enroll_from_file(token_file: &Path) -> ResultType<()> {
     let metadata = std::fs::metadata(token_file).context("Failed to read enrollment token file")?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TOKEN_SIZE {
         bail!("Invalid enrollment token file")
@@ -301,7 +277,7 @@ pub fn enroll_from_file(api_server: &str, token_file: &Path) -> ResultType<()> {
         .context("Failed to read enrollment token file")?
         .trim()
         .to_owned();
-    enroll(api_server, &token)
+    enroll(&token)
 }
 
 fn normalize_enrollment_token(token: &str) -> ResultType<String> {
@@ -312,9 +288,9 @@ fn normalize_enrollment_token(token: &str) -> ResultType<String> {
     Ok(token.to_owned())
 }
 
-pub fn enroll(api_server: &str, token: &str) -> ResultType<()> {
-    let api_server = validate_api_server(api_server)?;
+pub fn enroll(token: &str) -> ResultType<()> {
     let token = normalize_enrollment_token(token)?;
+    let api_server = crate::desktop_enrollment_token::api_server(&token)?;
     let _guard = IDENTITY_LOCK
         .lock()
         .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
@@ -1041,7 +1017,7 @@ mod tests {
         let message = registration_message(
             1,
             "request",
-            "rud1.selector.secret",
+            "rud2.selector.secret.nonce.ciphertext",
             "123",
             "uuid",
             "host",
@@ -1054,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(sha2::Sha256::digest(message)),
-            "d65d539941331f2eededeb5c0daf5da1ce3f0ab2bb7ebb4fc8573dbaf0946728"
+            "11e63c27568fd2b46a2df81243e503a0ea320fec406c5ab15d4b1b25583fde2e"
         );
     }
 
@@ -1102,10 +1078,20 @@ mod tests {
     #[test]
     fn desktop_enrollment_token_is_trimmed_and_bounded() {
         assert_eq!(
-            normalize_enrollment_token("  rud1.selector.secret\n").unwrap(),
-            "rud1.selector.secret"
+            normalize_enrollment_token("  rud2.selector.secret.nonce.ciphertext\n").unwrap(),
+            "rud2.selector.secret.nonce.ciphertext"
         );
         assert!(normalize_enrollment_token("  ").is_err());
         assert!(normalize_enrollment_token(&"x".repeat(MAX_TOKEN_SIZE as usize + 1)).is_err());
+    }
+
+    #[test]
+    fn desktop_enrollment_token_supplies_api_server() {
+        let token = "rud2.IKpRWaNJajsA_TyS.r5LPh4PbO6qOmg2BaMTR6eHDW9PePFGDvGaac8RR4bc.KkgP5kRqdsqT09eqIbIlM-uj8FufgWQD.wqZfN0L5dqGYaK9kFcNvjL7uYI8Ix_mwu2SWKab4TkKyzPWLDms1JdtBldhvlBjtGQY";
+        assert_eq!(
+            crate::desktop_enrollment_token::api_server(&token).unwrap(),
+            "https://api.example.com/management"
+        );
+        assert!(crate::desktop_enrollment_token::api_server("rud1.selector.secret").is_err());
     }
 }

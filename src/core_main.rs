@@ -434,13 +434,11 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             return None;
         } else if args[0] == "--desktop-enroll-file" {
-            if args.len() != 3 {
-                println!("Usage: --desktop-enroll-file <api-url> <token-file>");
+            if args.len() != 2 {
+                println!("Usage: --desktop-enroll-file <token-file>");
             } else {
-                match crate::desktop_provisioning::enroll_from_file(
-                    &args[1],
-                    std::path::Path::new(&args[2]),
-                ) {
+                match crate::desktop_provisioning::enroll_from_file(std::path::Path::new(&args[1]))
+                {
                     Ok(()) => println!("Desktop enrollment completed."),
                     Err(error) => println!("Desktop enrollment failed: {error}"),
                 }

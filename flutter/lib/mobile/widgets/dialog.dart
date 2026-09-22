@@ -9,35 +9,149 @@ import '../../common.dart';
 import '../../models/platform_model.dart';
 
 class ServerProfileStatus {
+  final bool configured;
   final String source;
   final int statusNum;
   final String idServer;
   final String relayServer;
   final String apiServer;
   final String revision;
+  final bool permanentPasswordSet;
+  final bool unattendedEnabled;
+  final String unattendedStatus;
+  final bool rootAvailable;
+  final bool screenCaptureReady;
+  final bool accessibilityReady;
+  final bool allFilesAccessReady;
+  final bool serviceRunning;
+  final String lastError;
 
   const ServerProfileStatus({
+    required this.configured,
     required this.source,
     required this.statusNum,
     required this.idServer,
     required this.relayServer,
     required this.apiServer,
     required this.revision,
+    required this.permanentPasswordSet,
+    required this.unattendedEnabled,
+    required this.unattendedStatus,
+    required this.rootAvailable,
+    required this.screenCaptureReady,
+    required this.accessibilityReady,
+    required this.allFilesAccessReady,
+    required this.serviceRunning,
+    required this.lastError,
   });
 
   bool get isManaged => source == 'provisioned' || source == 'waiting';
 
+  bool get unattendedReady =>
+      !unattendedEnabled ||
+      (unattendedStatus == 'success' &&
+          rootAvailable &&
+          screenCaptureReady &&
+          accessibilityReady &&
+          allFilesAccessReady &&
+          serviceRunning);
+
   factory ServerProfileStatus.fromJson(String value) {
     final json = jsonDecode(value) as Map<String, dynamic>;
     return ServerProfileStatus(
+      configured: json['configured'] as bool? ?? false,
       source: json['source'] as String? ?? 'public',
       statusNum: json['status_num'] as int? ?? 0,
       idServer: json['id_server'] as String? ?? '',
       relayServer: json['relay_server'] as String? ?? '',
       apiServer: json['api_server'] as String? ?? '',
       revision: json['revision'] as String? ?? '',
+      permanentPasswordSet: json['permanent_password_set'] as bool? ?? false,
+      unattendedEnabled: json['unattended_enabled'] as bool? ?? false,
+      unattendedStatus: json['unattended_status'] as String? ?? '',
+      rootAvailable: json['root_available'] as bool? ?? false,
+      screenCaptureReady: json['screen_capture_ready'] as bool? ?? false,
+      accessibilityReady: json['accessibility_ready'] as bool? ?? false,
+      allFilesAccessReady: json['all_files_access_ready'] as bool? ?? false,
+      serviceRunning: json['service_running'] as bool? ?? false,
+      lastError: json['last_error'] as String? ?? '',
     );
   }
+}
+
+enum AndroidRemoteConfigurationState {
+  notConfigured,
+  waiting,
+  ready,
+  partiallyReady,
+  connectionIssue,
+  remoteControlInProgress,
+}
+
+int androidActiveSessionCount() => gFFI.serverModel.clients
+    .where((client) =>
+        client.authorized &&
+        !client.disconnected &&
+        !client.isFileTransfer &&
+        !client.isViewCamera &&
+        !client.isTerminal &&
+        client.portForward.isEmpty)
+    .length;
+
+AndroidRemoteConfigurationState androidRemoteConfigurationState(
+  ServerProfileStatus? status, {
+  required int activeSessions,
+  int? statusNum,
+}) {
+  if (activeSessions > 0) {
+    return AndroidRemoteConfigurationState.remoteControlInProgress;
+  }
+  if (status == null || !status.configured) {
+    return AndroidRemoteConfigurationState.notConfigured;
+  }
+  if (status.source == 'waiting') {
+    return AndroidRemoteConfigurationState.waiting;
+  }
+  statusNum ??= status.statusNum;
+  if (statusNum < 0) {
+    return AndroidRemoteConfigurationState.connectionIssue;
+  }
+  if (statusNum == 0) {
+    return AndroidRemoteConfigurationState.waiting;
+  }
+  if (status.source != 'provisioned' ||
+      !status.permanentPasswordSet ||
+      !status.unattendedReady) {
+    return AndroidRemoteConfigurationState.partiallyReady;
+  }
+  return AndroidRemoteConfigurationState.ready;
+}
+
+String androidRemoteConfigurationStateLabel(
+    AndroidRemoteConfigurationState state) {
+  switch (state) {
+    case AndroidRemoteConfigurationState.notConfigured:
+      return translate('Not configured');
+    case AndroidRemoteConfigurationState.waiting:
+      return translate('Waiting');
+    case AndroidRemoteConfigurationState.ready:
+      return translate('Ready');
+    case AndroidRemoteConfigurationState.partiallyReady:
+      return translate('Partially ready');
+    case AndroidRemoteConfigurationState.connectionIssue:
+      return translate('Connection Error');
+    case AndroidRemoteConfigurationState.remoteControlInProgress:
+      return translate('Remote control in progress');
+  }
+}
+
+String androidRemoteConfigurationSummary(ServerProfileStatus? status,
+    {int? statusNum, int? activeSessions}) {
+  return androidRemoteConfigurationStateLabel(androidRemoteConfigurationState(
+    status,
+    activeSessions: activeSessions ?? androidActiveSessionCount(),
+    statusNum: statusNum,
+  ));
 }
 
 Future<ServerProfileStatus?> getServerProfileStatus() async {
@@ -174,6 +288,115 @@ void _showManagedServerSettings(
             if (status.revision.isNotEmpty)
               valueRow(translate('Policy revision'), status.revision),
           ],
+        ),
+      ),
+      actions: [
+        dialogButton('Close', onPressed: close),
+      ],
+    );
+  });
+}
+
+void showAndroidRemoteConfigurationStatus(
+    OverlayDialogManager dialogManager, ServerProfileStatus status) {
+  Widget valueRow(String label, String value, {String? detail}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: Text(label)),
+          const SizedBox(width: 16),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(value, textAlign: TextAlign.end),
+                if (detail?.isNotEmpty == true) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    detail!,
+                    textAlign: TextAlign.end,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String readyLabel(bool ready) => translate(ready ? 'Ready' : 'Not ready');
+
+  dialogManager.show((setState, close, context) {
+    return CustomAlertDialog(
+      title: Text(translate('Remote configuration status')),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 280, maxWidth: 500),
+        child: AnimatedBuilder(
+          animation: gFFI.serverModel,
+          builder: (context, child) {
+            final activeSessions = androidActiveSessionCount();
+            final connectionStatus = serverProfileConnectionLabel(status,
+                statusNum: gFFI.serverModel.connectStatus);
+            final unattendedLabel = !status.unattendedEnabled
+                ? translate('Not configured')
+                : readyLabel(status.unattendedReady);
+            return SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    androidRemoteConfigurationSummary(
+                      status,
+                      statusNum: gFFI.serverModel.connectStatus,
+                      activeSessions: activeSessions,
+                    ),
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  valueRow(
+                    translate('Managed by administrator'),
+                    status.source == 'waiting'
+                        ? translate('Waiting')
+                        : readyLabel(status.source == 'provisioned'),
+                  ),
+                  valueRow(translate('ID/Relay Server'), connectionStatus),
+                  valueRow(translate('Password'),
+                      readyLabel(status.permanentPasswordSet)),
+                  valueRow(translate('Unattended access'), unattendedLabel),
+                  if (status.unattendedEnabled) ...[
+                    valueRow(translate('Root access'),
+                        readyLabel(status.rootAvailable)),
+                    valueRow(translate('Screen Capture'),
+                        readyLabel(status.screenCaptureReady)),
+                    valueRow(translate('Accessibility service'),
+                        readyLabel(status.accessibilityReady)),
+                    valueRow(translate('All files access'),
+                        readyLabel(status.allFilesAccessReady)),
+                    valueRow(
+                      translate('Service'),
+                      translate(status.serviceRunning
+                          ? 'Service is running'
+                          : 'Service is not running'),
+                      detail: status.lastError,
+                    ),
+                  ],
+                  valueRow(
+                    translate('Active sessions'),
+                    activeSessions > 0
+                        ? translate('Remote control in progress')
+                        : translate('Disconnected'),
+                    detail: activeSessions.toString(),
+                  ),
+                  if (status.revision.isNotEmpty)
+                    valueRow(translate('Policy revision'), status.revision),
+                ],
+              ),
+            );
+          },
         ),
       ),
       actions: [

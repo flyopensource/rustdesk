@@ -1140,6 +1140,7 @@ pub fn main_get_server_profile_status() -> String {
             status_num = 1;
         }
         serde_json::json!({
+            "configured": crate::android_provisioning::is_configured(),
             "source": crate::android_provisioning::server_profile_source(),
             "status_num": status_num,
             "id_server": config::Config::get_effective_server_option(
@@ -1152,6 +1153,27 @@ pub fn main_get_server_profile_status() -> String {
             "revision": LocalConfig::get_option(
                 crate::android_provisioning::POLICY_REVISION_OPTION,
             ),
+            "permanent_password_set": ui_interface::is_permanent_password_set(),
+            "unattended_enabled": LocalConfig::get_option(
+                crate::android_provisioning::UNATTENDED_ENABLED_OPTION,
+            ) == "Y",
+            "unattended_status": LocalConfig::get_option("android-unattended-status"),
+            "root_available": LocalConfig::get_option(
+                "android-unattended-root-available",
+            ) == "Y",
+            "screen_capture_ready": LocalConfig::get_option(
+                "android-unattended-screen-capture-ready",
+            ) == "Y",
+            "accessibility_ready": LocalConfig::get_option(
+                "android-unattended-accessibility-ready",
+            ) == "Y",
+            "all_files_access_ready": LocalConfig::get_option(
+                "android-unattended-all-files-access-ready",
+            ) == "Y",
+            "service_running": LocalConfig::get_option(
+                "android-unattended-service-running",
+            ) == "Y",
+            "last_error": LocalConfig::get_option("android-unattended-last-error"),
         })
         .to_string()
     }

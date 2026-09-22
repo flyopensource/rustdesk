@@ -766,5 +766,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Managed by administrator", "由后台下发"),
         ("Not ready", "未就绪"),
         ("Policy revision", "策略版本"),
+        ("Remote configuration status", "远程配置状态"),
+        ("Not configured", "未配置"),
+        ("Partially ready", "部分就绪"),
+        ("Remote control in progress", "正在远程控制"),
+        ("Unattended access", "无人值守"),
+        ("Root access", "Root 权限"),
+        ("Accessibility service", "无障碍服务"),
+        ("All files access", "所有文件访问权限"),
+        ("Active sessions", "活动会话"),
     ].iter().cloned().collect();
 }

@@ -759,6 +759,29 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
+          if (isAndroid && !bind.isOutgoingOnly())
+            SettingsTile(
+                title: Text(translate('Remote configuration status')),
+                description: AnimatedBuilder(
+                  animation: gFFI.serverModel,
+                  builder: (context, child) => Text(
+                    androidRemoteConfigurationSummary(
+                      _serverProfileStatus,
+                      statusNum: gFFI.serverModel.connectStatus,
+                    ),
+                  ),
+                ),
+                leading: const Icon(Icons.admin_panel_settings_outlined),
+                onPressed: (context) async {
+                  await gFFI.serverModel.refreshManagedStorage();
+                  final status = await getServerProfileStatus();
+                  if (!mounted || status == null) return;
+                  setState(() {
+                    _serverProfileStatus = status;
+                  });
+                  showAndroidRemoteConfigurationStatus(
+                      gFFI.dialogManager, status);
+                }),
           if (!disabledSettings && !_hideNetwork && !_hideServer)
             SettingsTile(
                 title: Text(translate('ID/Relay Server')),

@@ -9,6 +9,14 @@ JNI_DIR="${ANDROID_DIR}/app/src/main/jniLibs"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/build/local-apk}"
 SYMBOL_DIR="${SYMBOL_DIR:-${SCRIPT_DIR}/build/split-debug-info}"
 TEMP_SOURCE_BACKUP=""
+BUILD_MAX_JOBS="${BUILD_MAX_JOBS:-1}"
+if [[ ! "${BUILD_MAX_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: invalid BUILD_MAX_JOBS: ${BUILD_MAX_JOBS}" >&2
+    exit 1
+fi
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${BUILD_MAX_JOBS}}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-${BUILD_MAX_JOBS}}"
+export VCPKG_MAX_CONCURRENCY="${VCPKG_MAX_CONCURRENCY:-${BUILD_MAX_JOBS}}"
 export ORG_GRADLE_PROJECT_managedStorage=true
 
 require_command() {
@@ -199,7 +207,8 @@ prepare_uni_links_plugin() {
 
 prepare_flutter_sources() {
     local flutter_version
-    local gradle_heap="${GRADLE_MAX_HEAP:-4096M}"
+    local gradle_heap="${GRADLE_MAX_HEAP:-2048M}"
+    local gradle_workers="${GRADLE_MAX_WORKERS:-${BUILD_MAX_JOBS}}"
     local needs_flutter_344_patch=0
 
     backup_flutter_sources
@@ -207,14 +216,26 @@ prepare_flutter_sources() {
         echo "ERROR: invalid GRADLE_MAX_HEAP: ${gradle_heap}" >&2
         exit 1
     fi
+    if [[ ! "${gradle_workers}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: invalid GRADLE_MAX_WORKERS: ${gradle_workers}" >&2
+        exit 1
+    fi
     sed -i -E \
         "s/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx${gradle_heap}/" \
         "${ANDROID_DIR}/gradle.properties"
+    sed -i \
+        -e '/^org\.gradle\.workers\.max=/d' \
+        -e '/^org\.gradle\.parallel=/d' \
+        -e '/^kotlin\.compiler\.execution\.strategy=/d' \
+        "${ANDROID_DIR}/gradle.properties"
+    printf '\norg.gradle.workers.max=%s\norg.gradle.parallel=false\nkotlin.compiler.execution.strategy=in-process\n' \
+        "${gradle_workers}" >>"${ANDROID_DIR}/gradle.properties"
     if ! grep -Fx "org.gradle.jvmargs=-Xmx${gradle_heap}" \
         "${ANDROID_DIR}/gradle.properties" >/dev/null; then
         echo "ERROR: failed to configure the Gradle heap" >&2
         exit 1
     fi
+    echo "INFO: build limits: jobs=${BUILD_MAX_JOBS}, Gradle heap=${gradle_heap}, workers=${gradle_workers}"
     flutter_version="$(flutter --version | sed -n '1s/^Flutter \([0-9.]*\).*/\1/p')"
     if [[ -z "${flutter_version}" ]]; then
         echo "ERROR: unable to determine Flutter version" >&2
@@ -378,7 +399,7 @@ build_android_target() {
                 export VCPKGRS_TRIPLET=arm-neon-android
             fi
             cargo ndk --platform 21 --target "${rust_target}" \
-                build --locked --release --features flutter,hwcodec
+                build --lib --locked --release --features flutter,hwcodec
         )
     fi
 

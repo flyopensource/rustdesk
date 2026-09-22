@@ -119,8 +119,22 @@ void showServerSettings(
   } catch (e) {
     print("Invalid server config: $e");
   }
+  String? managedApiServer;
+  if (isDesktop) {
+    try {
+      final status = jsonDecode(await bind.mainGetDesktopManagementStatus());
+      if (status is Map<String, dynamic> &&
+          status['enrolled'] == true &&
+          status['enabled'] == true) {
+        managedApiServer = status['api_server']?.toString() ?? '';
+      }
+    } catch (e) {
+      print("Invalid desktop management status: $e");
+    }
+  }
   showServerSettingsWithValue(
-      ServerConfig.fromOptions(options), dialogManager, setState);
+      ServerConfig.fromOptions(options), dialogManager, setState,
+      managedApiServer: managedApiServer);
 }
 
 void _showManagedServerSettings(
@@ -169,14 +183,14 @@ void _showManagedServerSettings(
   });
 }
 
-void showServerSettingsWithValue(
-    ServerConfig serverConfig,
-    OverlayDialogManager dialogManager,
-    void Function(VoidCallback)? upSetState) async {
+void showServerSettingsWithValue(ServerConfig serverConfig,
+    OverlayDialogManager dialogManager, void Function(VoidCallback)? upSetState,
+    {String? managedApiServer}) async {
   var isInProgress = false;
   final idCtrl = TextEditingController(text: serverConfig.idServer);
   final relayCtrl = TextEditingController(text: serverConfig.relayServer);
-  final apiCtrl = TextEditingController(text: serverConfig.apiServer);
+  final apiCtrl =
+      TextEditingController(text: managedApiServer ?? serverConfig.apiServer);
   final keyCtrl = TextEditingController(text: serverConfig.key);
 
   RxString idServerMsg = ''.obs;
@@ -201,7 +215,9 @@ void showServerSettingsWithValue(
           ServerConfig(
               idServer: idCtrl.text.trim(),
               relayServer: relayCtrl.text.trim(),
-              apiServer: apiCtrl.text.trim(),
+              apiServer: managedApiServer == null
+                  ? apiCtrl.text.trim()
+                  : serverConfig.apiServer,
               key: keyCtrl.text.trim()));
       setState(() {
         isInProgress = false;
@@ -211,7 +227,9 @@ void showServerSettingsWithValue(
 
     Widget buildField(
         String label, TextEditingController controller, String errorMsg,
-        {String? Function(String?)? validator, bool autofocus = false}) {
+        {String? Function(String?)? validator,
+        bool autofocus = false,
+        bool enabled = true}) {
       if (isDesktop || isWeb) {
         return Row(
           children: [
@@ -230,6 +248,7 @@ void showServerSettingsWithValue(
                 showLabelText: false,
                 validator: validator,
                 autofocus: autofocus,
+                enabled: enabled,
               ).workaroundFreezeLinuxMint(),
             ),
           ],
@@ -241,6 +260,7 @@ void showServerSettingsWithValue(
         controller: controller,
         errorMsg: errorMsg,
         validator: validator,
+        enabled: enabled,
       ).workaroundFreezeLinuxMint();
     }
 
@@ -269,6 +289,7 @@ void showServerSettingsWithValue(
                     translate('API Server'),
                     apiCtrl,
                     apiServerMsg.value,
+                    enabled: managedApiServer == null,
                     validator: (v) {
                       if (v != null && v.isNotEmpty) {
                         if (!(v.startsWith('http://') ||
@@ -318,6 +339,7 @@ TextFormField serverSettingsTextFormField({
   String? Function(String?)? validator,
   bool autofocus = false,
   bool showLabelText = true,
+  bool enabled = true,
   EdgeInsetsGeometry? contentPadding,
 }) {
   return TextFormField(
@@ -329,6 +351,7 @@ TextFormField serverSettingsTextFormField({
     ),
     validator: validator,
     autofocus: autofocus,
+    enabled: enabled,
     keyboardType: TextInputType.visiblePassword,
     textCapitalization: TextCapitalization.none,
     autocorrect: false,

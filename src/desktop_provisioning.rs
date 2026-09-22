@@ -28,6 +28,7 @@ struct DesktopIdentity {
     rustdesk_id: String,
     uuid: String,
     device_id: i64,
+    management_enabled: Option<bool>,
     next_sequence: i64,
     sign_public_key: String,
     sign_secret_key: String,
@@ -144,6 +145,17 @@ fn load_identity() -> DesktopIdentity {
 
 fn store_identity(identity: &DesktopIdentity) -> ResultType<()> {
     store_path(identity_path(), identity)
+}
+
+fn identity_management_enabled(identity: &DesktopIdentity) -> bool {
+    identity.device_id > 0 && identity.management_enabled.unwrap_or(true)
+}
+
+pub fn is_management_enabled() -> bool {
+    let Ok(_guard) = IDENTITY_LOCK.lock() else {
+        return false;
+    };
+    identity_management_enabled(&load_identity())
 }
 
 fn decode_fixed<const N: usize>(value: &str, label: &str) -> ResultType<[u8; N]> {
@@ -438,11 +450,14 @@ pub fn enroll(token: &str) -> ResultType<()> {
             .is_ok()
             && !response.policy_verify_key_id.is_empty()
         {
+            let password_cleared =
+                crate::ui_interface::set_managed_permanent_password_with_result(String::new());
             let identity = DesktopIdentity {
                 api_server,
                 rustdesk_id: id,
                 uuid,
                 device_id: response.device_id,
+                management_enabled: Some(password_cleared),
                 next_sequence: response.last_sequence.saturating_add(1).max(1),
                 sign_public_key: STANDARD.encode(sign_public_key.0),
                 sign_secret_key: STANDARD.encode(sign_secret_key.0),
@@ -450,7 +465,17 @@ pub fn enroll(token: &str) -> ResultType<()> {
                 box_secret_key: STANDARD.encode(box_secret_key.0),
                 policy_verify_key_id: response.policy_verify_key_id,
                 policy_verify_public_key: response.policy_verify_public_key,
-                password_status: "unchanged".to_owned(),
+                password_status: if password_cleared {
+                    "cleared"
+                } else {
+                    "failed"
+                }
+                .to_owned(),
+                password_error: if password_cleared {
+                    String::new()
+                } else {
+                    "Desktop service rejected permanent password cleanup".to_owned()
+                },
                 ..Default::default()
             };
             store_identity(&identity)?;
@@ -471,7 +496,7 @@ pub fn enroll(token: &str) -> ResultType<()> {
 pub fn auth_state(id: &str) -> Option<DeviceAuthState> {
     let _guard = IDENTITY_LOCK.lock().ok()?;
     let identity = load_identity();
-    if identity.device_id <= 0
+    if !identity_management_enabled(&identity)
         || identity.api_server.is_empty()
         || identity.rustdesk_id != id
         || identity.uuid != crate::encode64(hbb_common::get_uuid())
@@ -555,6 +580,7 @@ pub fn safe_status() -> Value {
     let identity = load_identity();
     json!({
         "enrolled": identity.device_id > 0,
+        "enabled": identity_management_enabled(&identity),
         "pending": identity.device_id <= 0 && !identity.enrollment_request_id.is_empty(),
         "api_server": identity.api_server,
         "rustdesk_id": identity.rustdesk_id,
@@ -572,6 +598,71 @@ pub fn safe_status() -> Value {
         "permanent_password_set": identity.permanent_password_set,
         "password_error": identity.password_error,
     })
+}
+
+pub fn set_management_enabled(enabled: bool) -> ResultType<bool> {
+    let device_id = {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        if identity.device_id <= 0 {
+            bail!("Desktop is not enrolled")
+        }
+        if identity_management_enabled(&identity) == enabled {
+            return Ok(false);
+        }
+        if !enabled {
+            identity.management_enabled = Some(false);
+            store_identity(&identity)?;
+        }
+        identity.device_id
+    };
+
+    if !crate::ui_interface::set_managed_permanent_password_with_result(String::new()) {
+        if !enabled {
+            let _guard = IDENTITY_LOCK
+                .lock()
+                .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+            let mut identity = load_identity();
+            if identity.device_id == device_id {
+                identity.management_enabled = Some(true);
+                store_identity(&identity)?;
+            }
+        }
+        bail!("Desktop service rejected permanent password cleanup")
+    }
+
+    if !enabled && Config::clear_desktop_managed_server_profile() {
+        crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+    }
+
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+    let mut identity = load_identity();
+    if identity.device_id != device_id {
+        bail!("Desktop identity changed")
+    }
+    identity.management_enabled = Some(enabled);
+    identity.policy_revision = 0;
+    identity.password_revision = 0;
+    identity.password_status = if enabled { "pending" } else { "cleared" }.to_owned();
+    identity.permanent_password_set = false;
+    identity.password_error.clear();
+    identity.profile_received_revision = 0;
+    identity.profile_applied_revision = 0;
+    identity.profile_failed_revision = 0;
+    identity.profile_apply_status = if enabled { "idle" } else { "disabled" }.to_owned();
+    identity.profile_active_source = if enabled {
+        "none".to_owned()
+    } else {
+        manual_fallback_source()
+    };
+    identity.profile_error.clear();
+    identity.profile_candidate_envelope.clear();
+    store_identity(&identity)?;
+    Ok(true)
 }
 
 pub fn retry_failed_server_profile() -> ResultType<bool> {
@@ -628,7 +719,8 @@ pub async fn signed_post(
             .lock()
             .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
         let mut identity = load_identity();
-        if identity.device_id != state.device_id
+        if !identity_management_enabled(&identity)
+            || identity.device_id != state.device_id
             || identity.rustdesk_id != state.rustdesk_id
             || identity.api_server != state.api_server
         {
@@ -737,7 +829,7 @@ pub fn restore_confirmed_server_profile() {
         return;
     };
     let identity = load_identity();
-    if identity.device_id <= 0
+    if !identity_management_enabled(&identity)
         || !identity.profile_confirmed_enabled
         || identity.profile_applied_revision <= 0
     {
@@ -776,6 +868,9 @@ async fn apply_server_profile(
     revision: i64,
     encoded: &str,
 ) -> ResultType<()> {
+    if !is_management_enabled() {
+        bail!("Desktop management is disabled")
+    }
     let previous = {
         let _guard = IDENTITY_LOCK
             .lock()
@@ -851,6 +946,13 @@ async fn apply_server_profile(
         hbb_common::tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     };
 
+    if !is_management_enabled() {
+        if Config::clear_desktop_managed_server_profile() {
+            crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+        }
+        bail!("Desktop management is disabled")
+    }
+
     if connected {
         let _guard = IDENTITY_LOCK
             .lock()
@@ -911,7 +1013,9 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
             .lock()
             .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
         let identity = load_identity();
-        if identity.rustdesk_id != id || identity.uuid != uuid {
+        if !identity_management_enabled(&identity) {
+            Err(anyhow!("Desktop management is disabled"))
+        } else if identity.rustdesk_id != id || identity.uuid != uuid {
             Err(anyhow!("Desktop policy target changed"))
         } else {
             decode_policy(encoded, &identity).map(|payload| (payload, identity.policy_revision))
@@ -962,7 +1066,7 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
         }
         let password = payload.desktop.unattended.permanent_password.clone();
         let applied = match hbb_common::tokio::task::spawn_blocking(move || {
-            crate::ui_interface::set_permanent_password_with_result(password)
+            crate::ui_interface::set_managed_permanent_password_with_result(password)
         })
         .await
         {
@@ -977,6 +1081,10 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
             let error = "Desktop service rejected permanent password update";
             record_policy_failure(error);
             bail!(error)
+        }
+        if !is_management_enabled() {
+            let _ = crate::ui_interface::set_managed_permanent_password_with_result(String::new());
+            bail!("Desktop management is disabled")
         }
         let _guard = IDENTITY_LOCK
             .lock()
@@ -1006,9 +1114,9 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_enrollment_token, policy_signature_message, registration_message,
-        server_profile_fingerprint, validate_server_profile, PolicyEnvelope, ServerProfilePolicy,
-        MAX_TOKEN_SIZE,
+        identity_management_enabled, normalize_enrollment_token, policy_signature_message,
+        registration_message, server_profile_fingerprint, validate_server_profile, DesktopIdentity,
+        PolicyEnvelope, ServerProfilePolicy, MAX_TOKEN_SIZE,
     };
     use sha2::Digest;
 
@@ -1032,6 +1140,23 @@ mod tests {
             hex::encode(sha2::Sha256::digest(message)),
             "11e63c27568fd2b46a2df81243e503a0ea320fec406c5ab15d4b1b25583fde2e"
         );
+    }
+
+    #[test]
+    fn enrolled_identity_defaults_to_management_enabled_for_migration() {
+        let mut identity = DesktopIdentity {
+            device_id: 7,
+            ..Default::default()
+        };
+        assert!(identity_management_enabled(&identity));
+
+        identity.management_enabled = Some(false);
+        assert!(!identity_management_enabled(&identity));
+        identity.management_enabled = Some(true);
+        assert!(identity_management_enabled(&identity));
+
+        identity.device_id = 0;
+        assert!(!identity_management_enabled(&identity));
     }
 
     #[test]

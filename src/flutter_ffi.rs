@@ -1188,6 +1188,21 @@ pub fn main_enroll_desktop(_api_server: String, token: String) -> String {
     }
 }
 
+pub fn main_set_desktop_management_enabled(enabled: bool) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::set_management_enabled(enabled)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = enabled;
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
 pub fn main_cancel_pending_desktop_enrollment() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -2687,6 +2702,12 @@ pub fn main_get_hard_option(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_get_buildin_option(key: String) -> SyncReturn<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if key == config::keys::OPTION_DISABLE_CHANGE_PERMANENT_PASSWORD
+        && crate::desktop_provisioning::is_management_enabled()
+    {
+        return SyncReturn("Y".to_owned());
+    }
     SyncReturn(get_builtin_option(&key))
 }
 

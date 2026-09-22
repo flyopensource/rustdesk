@@ -983,6 +983,10 @@ async fn handle(data: Data, stream: &mut Connection) {
                     // reading back any secret.
                     let ack = if updated { "Y" } else { "N" }.to_owned();
                     allow_err!(stream.send(&Data::Config((name.clone(), Some(ack)))).await);
+                } else if name == "managed-permanent-password" {
+                    updated = Config::set_managed_permanent_password(&value);
+                    let ack = if updated { "Y" } else { "N" }.to_owned();
+                    allow_err!(stream.send(&Data::Config((name.clone(), Some(ack)))).await);
                 } else if name == "salt" {
                     Config::set_salt(&value);
                 } else if name == "voice-call-input" {
@@ -1700,7 +1704,11 @@ pub fn get_fingerprint() -> String {
 }
 
 pub fn set_permanent_password(v: String) -> ResultType<()> {
-    if Config::is_disable_change_permanent_password() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let desktop_management_enabled = crate::desktop_provisioning::is_management_enabled();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let desktop_management_enabled = false;
+    if Config::is_disable_change_permanent_password() || desktop_management_enabled {
         bail!("Changing permanent password is disabled");
     }
     if set_permanent_password_with_ack(v)? {
@@ -1716,12 +1724,21 @@ pub async fn set_permanent_password_with_ack(v: String) -> ResultType<bool> {
 }
 
 async fn set_permanent_password_with_ack_async(v: String) -> ResultType<bool> {
+    set_password_with_ack_async("permanent-password", v).await
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub(crate) async fn set_managed_permanent_password_with_ack(v: String) -> ResultType<bool> {
+    set_password_with_ack_async("managed-permanent-password", v).await
+}
+
+async fn set_password_with_ack_async(name: &str, v: String) -> ResultType<bool> {
     // The daemon ACK/NACK is expected quickly since it applies the config in-process.
     let ms_timeout = 1_000;
     let mut c = connect(ms_timeout, "").await?;
-    c.send_config("permanent-password", v).await?;
+    c.send_config(name, v).await?;
     if let Some(Data::Config((name2, Some(v)))) = c.next_timeout(ms_timeout).await? {
-        if name2 == "permanent-password" {
+        if name2 == name {
             let v = v.trim();
             let ok = v == "Y";
             if ok {

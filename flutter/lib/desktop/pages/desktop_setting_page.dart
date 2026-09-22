@@ -956,6 +956,21 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     await refresh();
   }
 
+  Future<void> setManagementEnabled(bool enabled) async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final result = await bind.mainSetDesktopManagementEnabled(enabled: enabled);
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      error = result;
+    });
+    await gFFI.serverModel.updatePasswordModel();
+    await refresh();
+  }
+
   Widget statusRow(String label, String value) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1006,6 +1021,7 @@ class _DesktopManagementState extends State<_DesktopManagement> {
   @override
   Widget build(BuildContext context) {
     final enrolled = status['enrolled'] == true;
+    final enabled = status['enabled'] == true;
     final pending = status['pending'] == true;
     final passwordError = status['password_error']?.toString() ?? '';
     final managedProfileError = status['profile_error']?.toString() ?? '';
@@ -1013,7 +1029,22 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     return _Card(
       title: 'Managed by administrator',
       children: [
-        statusRow('Status', translate(enrolled ? 'Ready' : 'Not ready')),
+        Row(
+          children: [
+            SizedBox(width: 150, child: Text('${translate('Status')}:')),
+            Expanded(
+                child: Text(translate(!enrolled
+                    ? 'Not ready'
+                    : enabled
+                        ? 'Ready'
+                        : 'Disabled'))),
+            if (enrolled)
+              Switch(
+                value: enabled,
+                onChanged: busy ? null : setManagementEnabled,
+              ),
+          ],
+        ).marginOnly(left: _kContentHMargin),
         if (enrolled) ...[
           statusRow('API Server', status['api_server']?.toString() ?? ''),
           statusRow('ID', status['rustdesk_id']?.toString() ?? ''),

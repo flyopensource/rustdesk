@@ -642,7 +642,11 @@ pub fn is_local_permanent_password_set() -> bool {
 }
 
 pub fn set_permanent_password_with_result(password: String) -> bool {
-    if config::Config::is_disable_change_permanent_password() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let desktop_management_enabled = crate::desktop_provisioning::is_management_enabled();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let desktop_management_enabled = false;
+    if config::Config::is_disable_change_permanent_password() || desktop_management_enabled {
         return false;
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -657,6 +661,17 @@ pub fn set_permanent_password_with_result(password: String) -> bool {
                 log::warn!("Failed to set permanent password via IPC: {err}");
                 false
             }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn set_managed_permanent_password_with_result(password: String) -> bool {
+    match crate::ipc::set_managed_permanent_password_with_ack(password) {
+        Ok(ok) => ok,
+        Err(err) => {
+            log::warn!("Failed to set managed permanent password via IPC: {err}");
+            false
         }
     }
 }

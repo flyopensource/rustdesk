@@ -1931,6 +1931,10 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
     base64::decode(input)
 }
 
+fn select_connection_server_key(effective_key: Option<String>, configured_key: String) -> String {
+    effective_key.unwrap_or(configured_key)
+}
+
 pub async fn get_key(sync: bool) -> String {
     #[cfg(windows)]
     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
@@ -1944,8 +1948,17 @@ pub async fn get_key(sync: bool) -> String {
     let mut key = if sync {
         Config::get_effective_server_option("key")
     } else {
-        let mut options = crate::ipc::get_options_async().await;
-        options.remove("key").unwrap_or_default()
+        let effective_key = crate::ipc::get_config_async("effective-server-key", 1_000)
+            .await
+            .ok()
+            .flatten();
+        let configured_key = if effective_key.is_none() {
+            let mut options = crate::ipc::get_options_async().await;
+            options.remove("key").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        select_connection_server_key(effective_key, configured_key)
     };
     if key.is_empty() {
         key = config::RS_PUB_KEY.to_owned();
@@ -2818,6 +2831,21 @@ mod tests {
         for (id, expected) in cases {
             assert_eq!(is_valid_untrusted_peer_id(id), expected, "{id:?}");
         }
+    }
+
+    #[test]
+    fn connection_key_prefers_effective_server_profile() {
+        assert_eq!(
+            select_connection_server_key(
+                Some("managed-key".to_owned()),
+                "configured-key".to_owned()
+            ),
+            "managed-key"
+        );
+        assert_eq!(
+            select_connection_server_key(None, "configured-key".to_owned()),
+            "configured-key"
+        );
     }
 
     // ThrottledInterval tick at the same time as tokio interval, if no sleeps

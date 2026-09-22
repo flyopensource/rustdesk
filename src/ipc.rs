@@ -932,6 +932,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                     ));
                 } else if name == "rendezvous_servers" {
                     value = Some(Config::get_rendezvous_servers().join(","));
+                } else if name == "effective-server-key" {
+                    value = Some(Config::get_effective_server_option("key"));
                 } else if name == "fingerprint" {
                     value = if Config::get_key_confirmed() {
                         Some(crate::common::pk_to_fingerprint(Config::get_key_pair().1))
@@ -1603,7 +1605,10 @@ pub async fn get_config(name: &str) -> ResultType<Option<String>> {
     get_config_async(name, 1_000).await
 }
 
-async fn get_config_async(name: &str, ms_timeout: u64) -> ResultType<Option<String>> {
+pub(crate) async fn get_config_async(
+    name: &str,
+    ms_timeout: u64,
+) -> ResultType<Option<String>> {
     let mut c = connect(ms_timeout, "").await?;
     c.send(&Data::Config((name.to_owned(), None))).await?;
     if let Some(Data::Config((name2, value))) = c.next_timeout(ms_timeout).await? {

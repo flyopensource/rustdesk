@@ -971,6 +971,139 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     await refresh();
   }
 
+  List<Map<String, dynamic>> serverRoutes() {
+    final routes = status['server_routes'];
+    if (routes is! List) return const [];
+    return routes
+        .whereType<Map>()
+        .map((route) => route.map(
+              (key, value) => MapEntry(key.toString(), value),
+            ))
+        .toList();
+  }
+
+  Map<String, dynamic>? selectedServerRoute() {
+    final selected = status['selected_server_route_id']?.toString() ?? '';
+    for (final route in serverRoutes()) {
+      if (route['id']?.toString() == selected) return route;
+    }
+    return null;
+  }
+
+  Future<void> selectServerRoute(String routeId) async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final result = await bind.mainSelectDesktopServerRoute(routeId: routeId);
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      error = result;
+    });
+    await refresh();
+  }
+
+  void editServerRoute([Map<String, dynamic>? route]) {
+    final name = TextEditingController(text: route?['name']?.toString() ?? '');
+    final idServer =
+        TextEditingController(text: route?['id_server']?.toString() ?? '');
+    final relayServer =
+        TextEditingController(text: route?['relay_server']?.toString() ?? '');
+    final key = TextEditingController(text: route?['key']?.toString() ?? '');
+    var dialogBusy = false;
+    var dialogError = '';
+
+    Widget field(String label, TextEditingController controller) => Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: TextField(
+            controller: controller,
+            decoration: InputDecoration(labelText: translate(label)),
+          ),
+        );
+
+    gFFI.dialogManager.show((dialogSetState, close, context) {
+      Future<void> submit() async {
+        dialogSetState(() {
+          dialogBusy = true;
+          dialogError = '';
+        });
+        final result = await bind.mainSaveDesktopServerRoute(
+          routeId: route?['id']?.toString() ?? '',
+          name: name.text,
+          idServer: idServer.text,
+          relayServer: relayServer.text,
+          key: key.text,
+        );
+        if (result.isEmpty) {
+          close();
+          await refresh();
+          return;
+        }
+        dialogSetState(() {
+          dialogBusy = false;
+          dialogError = result;
+        });
+      }
+
+      return CustomAlertDialog(
+        title: Text(translate(route == null ? 'Add' : 'Edit')),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 480),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              field('Name', name),
+              field('ID Server', idServer),
+              field('Relay Server', relayServer),
+              field('Key', key),
+              if (dialogError.isNotEmpty)
+                Text(dialogError,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error))
+                    .marginOnly(top: 8),
+              if (dialogBusy)
+                const LinearProgressIndicator().marginOnly(top: 8),
+            ],
+          ),
+        ),
+        actions: [
+          dialogButton('Cancel', onPressed: dialogBusy ? null : close),
+          dialogButton('OK', onPressed: dialogBusy ? null : submit),
+        ],
+      );
+    });
+  }
+
+  void deleteSelectedServerRoute() {
+    final route = selectedServerRoute();
+    if (route == null) return;
+    gFFI.dialogManager.show((dialogSetState, close, context) {
+      return CustomAlertDialog(
+        title: Text(translate('Delete')),
+        content: Text('${translate('Delete')} ${route['name']}?'),
+        actions: [
+          dialogButton('Cancel', onPressed: close),
+          dialogButton('OK', onPressed: () async {
+            close();
+            setState(() {
+              busy = true;
+              error = '';
+            });
+            final result = await bind.mainDeleteDesktopServerRoute(
+                routeId: route['id']?.toString() ?? '');
+            if (!mounted) return;
+            setState(() {
+              busy = false;
+              error = result;
+            });
+            await refresh();
+          }),
+        ],
+      );
+    });
+  }
+
   Widget statusRow(String label, String value) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1026,6 +1159,10 @@ class _DesktopManagementState extends State<_DesktopManagement> {
     final passwordError = status['password_error']?.toString() ?? '';
     final managedProfileError = status['profile_error']?.toString() ?? '';
     final failedRevision = status['failed_revision'] as int? ?? 0;
+    final routes = serverRoutes();
+    final selectedRoute = selectedServerRoute();
+    final selectedRouteId =
+        status['selected_server_route_id']?.toString() ?? '';
     return _Card(
       title: 'Managed by administrator',
       children: [
@@ -1047,6 +1184,46 @@ class _DesktopManagementState extends State<_DesktopManagement> {
         ).marginOnly(left: _kContentHMargin),
         if (enrolled) ...[
           statusRow('API Server', status['api_server']?.toString() ?? ''),
+          Row(
+            children: [
+              SizedBox(
+                  width: 150, child: Text('${translate('ID/Relay Server')}:')),
+              Expanded(
+                child: ComboBox(
+                  keys: ['', ...routes.map((route) => route['id'].toString())],
+                  values: [
+                    translate('Default'),
+                    ...routes.map((route) => route['name'].toString())
+                  ],
+                  initialKey: routes.any(
+                          (route) => route['id']?.toString() == selectedRouteId)
+                      ? selectedRouteId
+                      : '',
+                  onChanged: selectServerRoute,
+                  enabled: !busy,
+                ),
+              ),
+              IconButton(
+                tooltip: translate('Add'),
+                onPressed: busy ? null : editServerRoute,
+                icon: const Icon(Icons.add),
+              ),
+              IconButton(
+                tooltip: translate('Edit'),
+                onPressed: busy || selectedRoute == null
+                    ? null
+                    : () => editServerRoute(selectedRoute),
+                icon: const Icon(Icons.edit),
+              ),
+              IconButton(
+                tooltip: translate('Delete'),
+                onPressed: busy || selectedRoute == null
+                    ? null
+                    : deleteSelectedServerRoute,
+                icon: const Icon(Icons.delete_outline),
+              ),
+            ],
+          ).marginOnly(left: _kContentHMargin),
           statusRow('ID', status['rustdesk_id']?.toString() ?? ''),
           statusRow(
               'Policy revision', status['policy_revision']?.toString() ?? '0'),

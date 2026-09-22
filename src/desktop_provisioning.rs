@@ -15,6 +15,8 @@ const MAX_TOKEN_SIZE: u64 = 4096;
 const MAX_ENVELOPE_SIZE: usize = 256 * 1024;
 const MAX_PASSWORD_SIZE: usize = 255;
 const MAX_SERVER_FIELD_SIZE: usize = 255;
+const MAX_ROUTE_NAME_SIZE: usize = 64;
+const MAX_SERVER_ROUTES: usize = 32;
 const PROFILE_CONNECT_TIMEOUT_SECONDS: u64 = 30;
 
 lazy_static::lazy_static! {
@@ -29,6 +31,8 @@ struct DesktopIdentity {
     uuid: String,
     device_id: i64,
     management_enabled: Option<bool>,
+    server_routes: Vec<LocalServerRoute>,
+    selected_server_route_id: String,
     next_sequence: i64,
     sign_public_key: String,
     sign_secret_key: String,
@@ -58,6 +62,16 @@ struct DesktopIdentity {
     enrollment_request_id: String,
     enrollment_token: String,
     enrollment_timestamp: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct LocalServerRoute {
+    id: String,
+    name: String,
+    id_server: String,
+    relay_server: String,
+    key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +205,36 @@ fn validate_server_profile(profile: &ServerProfilePolicy) -> ResultType<()> {
     Ok(())
 }
 
+fn validate_server_route(route: &LocalServerRoute) -> ResultType<()> {
+    if route.id.is_empty()
+        || route.name.trim().is_empty()
+        || route.name.len() > MAX_ROUTE_NAME_SIZE
+        || !valid_server_field(&route.id_server, true)
+        || !valid_server_field(&route.relay_server, false)
+        || !valid_server_field(&route.key, false)
+    {
+        bail!("Invalid desktop server route")
+    }
+    Ok(())
+}
+
+fn selected_server_route(identity: &DesktopIdentity) -> Option<&LocalServerRoute> {
+    identity
+        .server_routes
+        .iter()
+        .find(|route| route.id == identity.selected_server_route_id)
+        .filter(|route| validate_server_route(route).is_ok())
+}
+
+fn route_policy(route: &LocalServerRoute) -> ServerProfilePolicy {
+    ServerProfilePolicy {
+        enabled: true,
+        id_server: route.id_server.clone(),
+        relay_server: route.relay_server.clone(),
+        key: route.key.clone(),
+    }
+}
+
 fn server_profile_options(profile: &ServerProfilePolicy) -> HashMap<String, String> {
     HashMap::from([
         (
@@ -216,6 +260,53 @@ fn server_profile_fingerprint(profile: &ServerProfilePolicy) -> String {
         append_field(&mut value, field);
     }
     hex::encode(&sha256::hash(&value).0[..16])
+}
+
+fn managed_profile_matches(profile: &ServerProfilePolicy) -> bool {
+    Config::desktop_managed_server_profile_active()
+        && Config::get_effective_server_option(
+            hbb_common::config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
+        ) == profile.id_server
+        && Config::get_effective_server_option(hbb_common::config::keys::OPTION_RELAY_SERVER)
+            == profile.relay_server
+        && Config::get_effective_server_option(hbb_common::config::keys::OPTION_KEY) == profile.key
+}
+
+fn apply_effective_server_profile(identity: &DesktopIdentity, restart: bool) -> (String, String) {
+    let selected = selected_server_route(identity).map(route_policy);
+    let managed = if identity.profile_confirmed_enabled {
+        Some(ServerProfilePolicy {
+            enabled: true,
+            id_server: identity.profile_confirmed_id_server.clone(),
+            relay_server: identity.profile_confirmed_relay_server.clone(),
+            key: identity.profile_confirmed_key.clone(),
+        })
+    } else {
+        None
+    };
+    let (profile, source) = if let Some(profile) = selected {
+        (Some(profile), "local")
+    } else if let Some(profile) = managed {
+        (Some(profile), "managed")
+    } else {
+        (None, "none")
+    };
+    if let Some(profile) = profile {
+        if !managed_profile_matches(&profile) {
+            Config::set_desktop_managed_server_profile(server_profile_options(&profile));
+            if restart {
+                crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+            }
+        }
+        (source.to_owned(), server_profile_fingerprint(&profile))
+    } else {
+        if Config::clear_desktop_managed_server_profile() {
+            if restart {
+                crate::rendezvous_mediator::RendezvousMediator::restart_for_managed_profile();
+            }
+        }
+        (source.to_owned(), String::new())
+    }
 }
 
 fn manual_fallback_source() -> String {
@@ -581,6 +672,8 @@ pub fn safe_status() -> Value {
     json!({
         "enrolled": identity.device_id > 0,
         "enabled": identity_management_enabled(&identity),
+        "server_routes": identity.server_routes,
+        "selected_server_route_id": identity.selected_server_route_id,
         "pending": identity.device_id <= 0 && !identity.enrollment_request_id.is_empty(),
         "api_server": identity.api_server,
         "rustdesk_id": identity.rustdesk_id,
@@ -662,7 +755,143 @@ pub fn set_management_enabled(enabled: bool) -> ResultType<bool> {
     identity.profile_error.clear();
     identity.profile_candidate_envelope.clear();
     store_identity(&identity)?;
+    let identity = identity.clone();
+    drop(_guard);
+    if enabled {
+        apply_stored_server_route(&identity)?;
+    }
     Ok(true)
+}
+
+fn apply_stored_server_route(identity: &DesktopIdentity) -> ResultType<()> {
+    if !identity_management_enabled(identity) {
+        return Ok(());
+    }
+    let (source, fingerprint) = apply_effective_server_profile(identity, true);
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+    let mut current = load_identity();
+    if current.device_id != identity.device_id
+        || current.selected_server_route_id != identity.selected_server_route_id
+    {
+        bail!("Desktop server route changed")
+    }
+    current.profile_apply_status = if source == "none" {
+        "disabled"
+    } else {
+        "success"
+    }
+    .to_owned();
+    current.profile_active_source = source;
+    current.profile_fingerprint = fingerprint;
+    current.profile_error.clear();
+    store_identity(&current)
+}
+
+pub fn save_server_route(
+    route_id: &str,
+    name: &str,
+    id_server: &str,
+    relay_server: &str,
+    key: &str,
+) -> ResultType<()> {
+    let is_new = route_id.trim().is_empty();
+    let route = LocalServerRoute {
+        id: if is_new {
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(12))
+        } else {
+            route_id.trim().to_owned()
+        },
+        name: name.trim().to_owned(),
+        id_server: id_server.trim().to_owned(),
+        relay_server: relay_server.trim().to_owned(),
+        key: key.trim().to_owned(),
+    };
+    validate_server_route(&route)?;
+    let identity = {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        if identity.device_id <= 0 {
+            bail!("Desktop is not enrolled")
+        }
+        if identity.server_routes.iter().any(|existing| {
+            existing.id != route.id && existing.name.eq_ignore_ascii_case(&route.name)
+        }) {
+            bail!("Desktop server route name already exists")
+        }
+        if let Some(existing) = identity
+            .server_routes
+            .iter_mut()
+            .find(|existing| existing.id == route.id)
+        {
+            *existing = route.clone();
+        } else {
+            if !is_new {
+                bail!("Desktop server route was not found")
+            }
+            if identity.server_routes.len() >= MAX_SERVER_ROUTES {
+                bail!("Too many desktop server routes")
+            }
+            identity.server_routes.push(route.clone());
+            identity.selected_server_route_id = route.id.clone();
+        }
+        store_identity(&identity)?;
+        identity
+    };
+    apply_stored_server_route(&identity)
+}
+
+pub fn select_server_route(route_id: &str) -> ResultType<()> {
+    let identity = {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        if identity.device_id <= 0 {
+            bail!("Desktop is not enrolled")
+        }
+        let route_id = route_id.trim();
+        if !route_id.is_empty()
+            && !identity
+                .server_routes
+                .iter()
+                .any(|route| route.id == route_id)
+        {
+            bail!("Desktop server route was not found")
+        }
+        identity.selected_server_route_id = route_id.to_owned();
+        store_identity(&identity)?;
+        identity
+    };
+    apply_stored_server_route(&identity)
+}
+
+pub fn delete_server_route(route_id: &str) -> ResultType<()> {
+    let identity = {
+        let _guard = IDENTITY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+        let mut identity = load_identity();
+        if identity.device_id <= 0 {
+            bail!("Desktop is not enrolled")
+        }
+        let previous_len = identity.server_routes.len();
+        identity
+            .server_routes
+            .retain(|route| route.id != route_id.trim());
+        if identity.server_routes.len() == previous_len {
+            bail!("Desktop server route was not found")
+        }
+        if identity.selected_server_route_id == route_id.trim() {
+            identity.selected_server_route_id.clear();
+        }
+        store_identity(&identity)?;
+        identity
+    };
+    apply_stored_server_route(&identity)
 }
 
 pub fn retry_failed_server_profile() -> ResultType<bool> {
@@ -829,23 +1058,10 @@ pub fn restore_confirmed_server_profile() {
         return;
     };
     let identity = load_identity();
-    if !identity_management_enabled(&identity)
-        || !identity.profile_confirmed_enabled
-        || identity.profile_applied_revision <= 0
-    {
+    if !identity_management_enabled(&identity) {
         return;
     }
-    let profile = ServerProfilePolicy {
-        enabled: true,
-        id_server: identity.profile_confirmed_id_server,
-        relay_server: identity.profile_confirmed_relay_server,
-        key: identity.profile_confirmed_key,
-    };
-    if let Err(error) = validate_server_profile(&profile) {
-        hbb_common::log::warn!("Failed to restore desktop managed profile: {error}");
-        return;
-    }
-    Config::set_desktop_managed_server_profile(server_profile_options(&profile));
+    apply_effective_server_profile(&identity, false);
 }
 
 fn restore_previous_server_profile(identity: &DesktopIdentity) {
@@ -885,6 +1101,29 @@ async fn apply_server_profile(
         store_identity(&identity)?;
         identity
     };
+
+    if selected_server_route(&previous).is_some() {
+        let identity = {
+            let _guard = IDENTITY_LOCK
+                .lock()
+                .map_err(|_| anyhow!("Desktop identity lock is poisoned"))?;
+            let mut identity = load_identity();
+            identity.profile_applied_revision = revision;
+            identity.profile_failed_revision = 0;
+            identity.profile_apply_status = "success".to_owned();
+            identity.profile_active_source = "local".to_owned();
+            identity.profile_error.clear();
+            identity.profile_candidate_envelope.clear();
+            identity.profile_confirmed_enabled = profile.enabled;
+            identity.profile_confirmed_id_server = profile.id_server.clone();
+            identity.profile_confirmed_relay_server = profile.relay_server.clone();
+            identity.profile_confirmed_key = profile.key.clone();
+            store_identity(&identity)?;
+            identity
+        };
+        apply_stored_server_route(&identity)?;
+        return Ok(());
+    }
 
     if !profile.enabled {
         if Config::clear_desktop_managed_server_profile() {
@@ -1115,7 +1354,8 @@ pub async fn apply_policy(encoded: &str, id: &str, uuid: &str) -> ResultType<i64
 mod tests {
     use super::{
         identity_management_enabled, normalize_enrollment_token, policy_signature_message,
-        registration_message, server_profile_fingerprint, validate_server_profile, DesktopIdentity,
+        registration_message, selected_server_route, server_profile_fingerprint,
+        validate_server_profile, validate_server_route, DesktopIdentity, LocalServerRoute,
         PolicyEnvelope, ServerProfilePolicy, MAX_TOKEN_SIZE,
     };
     use sha2::Digest;
@@ -1157,6 +1397,32 @@ mod tests {
 
         identity.device_id = 0;
         assert!(!identity_management_enabled(&identity));
+    }
+
+    #[test]
+    fn desktop_server_routes_require_a_name_and_id_server() {
+        let route = LocalServerRoute {
+            id: "route-1".to_owned(),
+            name: "Primary".to_owned(),
+            id_server: "id.example.com:21116".to_owned(),
+            relay_server: "relay.example.com:21117".to_owned(),
+            key: "server-key".to_owned(),
+        };
+        assert!(validate_server_route(&route).is_ok());
+
+        let mut invalid = route.clone();
+        invalid.name.clear();
+        assert!(validate_server_route(&invalid).is_err());
+        invalid = route.clone();
+        invalid.id_server = "id.example.com bad".to_owned();
+        assert!(validate_server_route(&invalid).is_err());
+
+        let identity = DesktopIdentity {
+            server_routes: vec![route],
+            selected_server_route_id: "route-1".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(selected_server_route(&identity).unwrap().name, "Primary");
     }
 
     #[test]

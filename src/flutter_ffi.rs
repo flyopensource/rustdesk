@@ -1203,6 +1203,63 @@ pub fn main_set_desktop_management_enabled(enabled: bool) -> String {
     }
 }
 
+pub fn main_save_desktop_server_route(
+    route_id: String,
+    name: String,
+    id_server: String,
+    relay_server: String,
+    key: String,
+) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::save_server_route(
+            &route_id,
+            &name,
+            &id_server,
+            &relay_server,
+            &key,
+        )
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (route_id, name, id_server, relay_server, key);
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
+pub fn main_select_desktop_server_route(route_id: String) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::select_server_route(&route_id)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = route_id;
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
+pub fn main_delete_desktop_server_route(route_id: String) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::desktop_provisioning::delete_server_route(&route_id)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = route_id;
+        "Desktop management is unavailable".to_owned()
+    }
+}
+
 pub fn main_cancel_pending_desktop_enrollment() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {

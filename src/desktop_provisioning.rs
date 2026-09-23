@@ -31,7 +31,6 @@ struct DesktopIdentity {
     uuid: String,
     device_id: i64,
     management_enabled: Option<bool>,
-    server_routes: Vec<LocalServerRoute>,
     selected_server_route_id: String,
     next_sequence: i64,
     sign_public_key: String,
@@ -62,6 +61,8 @@ struct DesktopIdentity {
     enrollment_request_id: String,
     enrollment_token: String,
     enrollment_timestamp: i64,
+    // confy's TOML serializer requires array-of-table fields after root scalar fields.
+    server_routes: Vec<LocalServerRoute>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1423,6 +1424,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(selected_server_route(&identity).unwrap().name, "Primary");
+    }
+
+    #[test]
+    fn desktop_server_routes_round_trip_through_config_storage() {
+        let path = std::env::temp_dir().join(format!(
+            "rustdesk-desktop-routes-{}-{}.toml",
+            std::process::id(),
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        let identity = DesktopIdentity {
+            device_id: 7,
+            management_enabled: Some(true),
+            selected_server_route_id: "route-1".to_owned(),
+            server_routes: vec![LocalServerRoute {
+                id: "route-1".to_owned(),
+                name: "Primary".to_owned(),
+                id_server: "id.example.com:21116".to_owned(),
+                relay_server: "relay.example.com:21117".to_owned(),
+                key: "server-key".to_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let stored = hbb_common::config::store_path(path.clone(), &identity);
+        assert!(stored.is_ok(), "{stored:?}");
+        let loaded: DesktopIdentity = hbb_common::config::load_path(path.clone());
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.selected_server_route_id, "route-1");
+        assert_eq!(loaded.server_routes.len(), 1);
+        assert_eq!(loaded.server_routes[0].name, "Primary");
     }
 
     #[test]

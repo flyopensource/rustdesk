@@ -715,29 +715,14 @@ jobs:
 
 
   build-for-macOS:
-    if: ${{ !inputs.desktop-x86_64-only }}
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
     strategy:
       fail-fast: false
       matrix:
-        job:
-          - {
-              target: x86_64-apple-darwin,
-              os: macos-15-intel, #macos-latest or macos-14 use M1 now, https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#:~:text=14%20GB-,macos%2Dlatest%20or%20macos%2D14,-The%20macos%2Dlatestlabel
-              extra-build-args: "",
-              arch: x86_64,
-              vcpkg-triplet: x64-osx,
-            }
-          - {
-              target: aarch64-apple-darwin,
-              os: macos-14,
-              # extra-build-args: "--disable-flutter-texture-render", # disable this for mac, because we see a lot of users reporting flickering both on arm and x64, and we can not confirm if texture rendering has better performance if htere is no vram, https://github.com/rustdesk/rustdesk/issues/6296
-              extra-build-args: "--screencapturekit",
-              arch: aarch64,
-              vcpkg-triplet: arm64-osx,
-            }
+        # The focused desktop workflow uses the Intel runner only; full releases keep both macOS architectures.
+        job: ${{ fromJSON(inputs.desktop-x86_64-only && '[{"target":"x86_64-apple-darwin","os":"macos-15-intel","extra-build-args":"","arch":"x86_64","vcpkg-triplet":"x64-osx"}]' || '[{"target":"x86_64-apple-darwin","os":"macos-15-intel","extra-build-args":"","arch":"x86_64","vcpkg-triplet":"x64-osx"},{"target":"aarch64-apple-darwin","os":"macos-14","extra-build-args":"--screencapturekit","arch":"aarch64","vcpkg-triplet":"arm64-osx"}]') }}
     steps:
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
@@ -752,7 +737,7 @@ jobs:
           submodules: recursive
 
       - name: Import the codesign cert
-        if: env.MACOS_P12_BASE64 != null
+        if: env.MACOS_P12_BASE64 != ''
         uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
         with:
           p12-file-base64: ${{ secrets.MACOS_P12_BASE64 }}
@@ -760,13 +745,13 @@ jobs:
           keychain: rustdesk
 
       - name: Check sign and import sign key
-        if: env.MACOS_P12_BASE64 != null
+        if: env.MACOS_P12_BASE64 != ''
         run: |
           security default-keychain -s rustdesk.keychain
           security find-identity -v
 
       - name: Import notarize key
-        if: env.MACOS_P12_BASE64 != null
+        if: env.MACOS_P12_BASE64 != ''
         uses: timheuer/base64-to-file@adaa40c0c581f276132199d4cf60afa07ce60eac # v1.2
         with:
           # https://gregoryszorc.com/docs/apple-codesign/stable/apple_codesign_rcodesign.html#notarizing-and-stapling
@@ -775,7 +760,7 @@ jobs:
           encodedString: ${{ secrets.MACOS_NOTARIZE_JSON }}
 
       - name: Install rcodesign tool
-        if: env.MACOS_P12_BASE64 != null
+        if: env.MACOS_P12_BASE64 != ''
         shell: bash
         run: |
           pushd /tmp
@@ -902,7 +887,7 @@ jobs:
           path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
 
       - name: Codesign app and create signed dmg
-        if: env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'
+        if: env.MACOS_P12_BASE64 != '' && env.UPLOAD_ARTIFACT == 'true'
         run: |
           # Patch create-dmg to give more attempts to unmount image
           CREATE_DMG="$(command -v create-dmg)"
@@ -922,8 +907,10 @@ jobs:
       - name: Rename rustdesk
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
-          for name in rustdesk*??.dmg; do
+          for name in rustdesk*.dmg; do
+            if [[ "$name" != *"-${{ matrix.job.arch }}.dmg" ]]; then
               mv "$name" "${name%%.dmg}-${{ matrix.job.arch }}.dmg"
+            fi
           done
 
       - name: Publish DMG package

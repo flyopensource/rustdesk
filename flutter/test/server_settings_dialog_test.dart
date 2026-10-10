@@ -41,6 +41,8 @@ void main() {
       {
         "configured": true,
         "source": "manual",
+        "bootstrap_url": "https://mirror.example/rud.cfg",
+        "bootstrap_url_is_default": false,
         "use_managed_server_profile": false,
         "managed_id_server": "managed.example:21116",
         "managed_relay_server": "managed.example:21117",
@@ -52,6 +54,8 @@ void main() {
     ''');
 
     expect(status.useManagedServerProfile, isFalse);
+    expect(status.bootstrapUrl, 'https://mirror.example/rud.cfg');
+    expect(status.bootstrapUrlIsDefault, isFalse);
     expect(status.managedIdServer, 'managed.example:21116');
     expect(status.managedRelayServer, 'managed.example:21117');
     expect(status.managedKey, 'managed-key');

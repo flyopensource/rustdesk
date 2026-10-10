@@ -11,6 +11,7 @@ use std::{collections::HashMap, convert::TryInto, time::Duration};
 
 const ENVELOPE_VERSION: u32 = 1;
 const CACHE_OPTION: &str = "android-provisioning-bootstrap-envelope";
+const BOOTSTRAP_URL_OPTION: &str = "android-provisioning-bootstrap-url";
 const POLICY_CACHE_OPTION: &str = "android-provisioning-policy-envelope";
 pub const UNATTENDED_ENABLED_OPTION: &str = "android-unattended-enabled";
 pub const UNATTENDED_ROOT_OPTION: &str = "android-unattended-root-command";
@@ -89,10 +90,32 @@ struct PolicyPayload {
 }
 
 pub fn is_configured() -> bool {
+    !default_bootstrap_url().is_empty()
+}
+
+fn default_bootstrap_url() -> &'static str {
     option_env!("RUD_CFG_URL")
         .map(str::trim)
         .unwrap_or_default()
-        != ""
+}
+
+pub fn bootstrap_url() -> String {
+    let configured = LocalConfig::get_option(BOOTSTRAP_URL_OPTION);
+    bootstrap_url_for(configured.trim(), default_bootstrap_url())
+}
+
+fn bootstrap_url_for(configured: &str, default_url: &str) -> String {
+    if configured.is_empty() {
+        default_url.to_owned()
+    } else {
+        configured.to_owned()
+    }
+}
+
+pub fn bootstrap_url_is_default() -> bool {
+    LocalConfig::get_option(BOOTSTRAP_URL_OPTION)
+        .trim()
+        .is_empty()
 }
 
 pub fn device_enrollment_key() -> ResultType<auth::Key> {
@@ -497,6 +520,57 @@ async fn download_bootstrap(url: &str) -> ResultType<Vec<u8>> {
     Ok(bytes)
 }
 
+fn validate_bootstrap_revision(payload: &BootstrapPayload) -> ResultType<()> {
+    let cached_revision = cached_bootstrap()
+        .ok()
+        .flatten()
+        .map(|(payload, _)| payload.revision)
+        .unwrap_or(0);
+    validate_bootstrap_revision_value(payload.revision, cached_revision)
+}
+
+fn validate_bootstrap_revision_value(candidate: u64, cached: u64) -> ResultType<()> {
+    if candidate < cached {
+        bail!("Provisioning bootstrap revision rollback")
+    }
+    Ok(())
+}
+
+async fn download_validated_bootstrap(url: &str) -> ResultType<(BootstrapPayload, Vec<u8>)> {
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("Missing provisioning bootstrap URL")
+    }
+    let bytes = download_bootstrap(url).await?;
+    let payload = decode_bootstrap(&bytes)?;
+    validate_bootstrap_revision(&payload)?;
+    Ok((payload, bytes))
+}
+
+pub async fn test_bootstrap_url(url: &str) -> ResultType<()> {
+    download_validated_bootstrap(url).await.map(|_| ())
+}
+
+pub async fn save_bootstrap_url(url: &str, restore_default: bool) -> ResultType<()> {
+    let candidate_url = if restore_default {
+        default_bootstrap_url()
+    } else {
+        url.trim()
+    };
+    let (_, bytes) = download_validated_bootstrap(candidate_url).await?;
+    LocalConfig::set_option(CACHE_OPTION.to_owned(), STANDARD.encode(bytes));
+    LocalConfig::set_option(
+        BOOTSTRAP_URL_OPTION.to_owned(),
+        if restore_default {
+            String::new()
+        } else {
+            candidate_url.to_owned()
+        },
+    );
+    *LAST_REFRESH.lock().unwrap() = Some(std::time::Instant::now());
+    Ok(())
+}
+
 pub async fn provisioning_api_server() -> String {
     if !is_configured() {
         return String::new();
@@ -513,10 +587,8 @@ pub async fn provisioning_api_server() -> String {
             .map(|(payload, _)| payload.provisioning_api_server)
             .unwrap_or_default();
     }
-    let url = option_env!("RUD_CFG_URL")
-        .map(str::trim)
-        .unwrap_or_default();
-    match download_bootstrap(url).await.and_then(|bytes| {
+    let url = bootstrap_url();
+    match download_bootstrap(&url).await.and_then(|bytes| {
         let payload = decode_bootstrap(&bytes)?;
         Ok((payload, bytes))
     }) {
@@ -545,7 +617,10 @@ pub async fn provisioning_api_server() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{server_profile_source_for_state, signature_message, valid_root_command};
+    use super::{
+        bootstrap_url_for, server_profile_source_for_state, signature_message, valid_root_command,
+        validate_bootstrap_revision_value,
+    };
 
     #[test]
     fn signature_message_binds_purpose_and_key_id() {
@@ -586,5 +661,27 @@ mod tests {
             server_profile_source_for_state(false, false, false, false),
             "public"
         );
+    }
+
+    #[test]
+    fn custom_bootstrap_url_overrides_packaged_default() {
+        assert_eq!(
+            bootstrap_url_for(
+                "https://mirror.example/rud.cfg",
+                "https://default.example/rud.cfg"
+            ),
+            "https://mirror.example/rud.cfg"
+        );
+        assert_eq!(
+            bootstrap_url_for("", "https://default.example/rud.cfg"),
+            "https://default.example/rud.cfg"
+        );
+    }
+
+    #[test]
+    fn bootstrap_revision_cannot_roll_back() {
+        assert!(validate_bootstrap_revision_value(2, 1).is_ok());
+        assert!(validate_bootstrap_revision_value(2, 2).is_ok());
+        assert!(validate_bootstrap_revision_value(1, 2).is_err());
     }
 }

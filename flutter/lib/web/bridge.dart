@@ -785,6 +785,20 @@ class RustdeskImpl {
     return Future(() => js.context.callMethod('setByName', ['options', json]));
   }
 
+  Future<String> mainGetServerProfileStatus({dynamic hint}) {
+    return Future.value('{}');
+  }
+
+  Future<String> mainTestProvisioningConfigUrl(
+      {required String url, dynamic hint}) {
+    return Future.value('Unsupported platform');
+  }
+
+  Future<String> mainSaveProvisioningConfigUrl(
+      {required String url, required bool restoreDefault, dynamic hint}) {
+    return Future.value('Unsupported platform');
+  }
+
   Future<String> mainTestIfValidServer(
       {required String server, required bool testWithProxy, dynamic hint}) {
     // TODO: implement

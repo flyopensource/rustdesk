@@ -776,5 +776,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("All files access", ""),
         ("Active sessions", ""),
         ("Use managed server configuration", ""),
+        ("Configuration URL", ""),
+        ("Save", ""),
+        ("Restore packaged default", ""),
     ].iter().cloned().collect();
 }

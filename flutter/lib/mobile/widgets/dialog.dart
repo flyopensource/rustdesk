@@ -15,6 +15,8 @@ class ServerProfileStatus {
   final String idServer;
   final String relayServer;
   final String apiServer;
+  final String bootstrapUrl;
+  final bool bootstrapUrlIsDefault;
   final bool useManagedServerProfile;
   final String managedIdServer;
   final String managedRelayServer;
@@ -40,6 +42,8 @@ class ServerProfileStatus {
     required this.idServer,
     required this.relayServer,
     required this.apiServer,
+    this.bootstrapUrl = '',
+    this.bootstrapUrlIsDefault = true,
     this.useManagedServerProfile = false,
     this.managedIdServer = '',
     this.managedRelayServer = '',
@@ -82,6 +86,8 @@ class ServerProfileStatus {
       idServer: json['id_server'] as String? ?? '',
       relayServer: json['relay_server'] as String? ?? '',
       apiServer: json['api_server'] as String? ?? '',
+      bootstrapUrl: json['bootstrap_url'] as String? ?? '',
+      bootstrapUrlIsDefault: json['bootstrap_url_is_default'] as bool? ?? true,
       useManagedServerProfile:
           json['use_managed_server_profile'] as bool? ?? false,
       managedIdServer: json['managed_id_server'] as String? ?? '',
@@ -476,6 +482,10 @@ void _showManagedServerSettings(
 
 void showAndroidRemoteConfigurationStatus(
     OverlayDialogManager dialogManager, ServerProfileStatus status) {
+  final bootstrapUrlCtrl = TextEditingController(text: status.bootstrapUrl);
+  var bootstrapUrlError = '';
+  var bootstrapUrlBusy = false;
+
   Widget valueRow(String label, String value, {String? detail}) {
     return Padding(
       padding: const EdgeInsets.only(top: 12),
@@ -508,6 +518,36 @@ void showAndroidRemoteConfigurationStatus(
   String readyLabel(bool ready) => translate(ready ? 'Ready' : 'Not ready');
 
   dialogManager.show((setState, close, context) {
+    Future<void> updateBootstrapUrl({
+      required bool save,
+      bool restoreDefault = false,
+    }) async {
+      setState(() {
+        bootstrapUrlBusy = true;
+        bootstrapUrlError = '';
+      });
+      final result = save
+          ? await bind.mainSaveProvisioningConfigUrl(
+              url: bootstrapUrlCtrl.text.trim(),
+              restoreDefault: restoreDefault,
+            )
+          : await bind.mainTestProvisioningConfigUrl(
+              url: bootstrapUrlCtrl.text.trim(),
+            );
+      if (result.isEmpty) {
+        if (save) {
+          final refreshed = await getServerProfileStatus();
+          if (refreshed != null) {
+            bootstrapUrlCtrl.text = refreshed.bootstrapUrl;
+          }
+        }
+        showToast(translate('Successful'));
+      } else {
+        bootstrapUrlError = result;
+      }
+      setState(() => bootstrapUrlBusy = false);
+    }
+
     return CustomAlertDialog(
       title: Text(translate('Remote configuration status')),
       content: ConstrainedBox(
@@ -534,6 +574,48 @@ void showAndroidRemoteConfigurationStatus(
                     ),
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
+                  if (status.configured) ...[
+                    const SizedBox(height: 12),
+                    serverSettingsTextFormField(
+                      label: translate('Configuration URL'),
+                      controller: bootstrapUrlCtrl,
+                      errorMsg: bootstrapUrlError,
+                      enabled: !bootstrapUrlBusy,
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton(
+                          onPressed: bootstrapUrlBusy
+                              ? null
+                              : () => updateBootstrapUrl(save: false),
+                          child: Text(translate('Test')),
+                        ),
+                        ElevatedButton(
+                          onPressed: bootstrapUrlBusy
+                              ? null
+                              : () => updateBootstrapUrl(save: true),
+                          child: Text(translate('Save')),
+                        ),
+                        TextButton(
+                          onPressed: bootstrapUrlBusy
+                              ? null
+                              : () => updateBootstrapUrl(
+                                    save: true,
+                                    restoreDefault: true,
+                                  ),
+                          child: Text(translate('Restore packaged default')),
+                        ),
+                      ],
+                    ),
+                    if (bootstrapUrlBusy)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: LinearProgressIndicator(),
+                      ),
+                  ],
                   valueRow(
                     translate('Managed by administrator'),
                     status.source == 'waiting'

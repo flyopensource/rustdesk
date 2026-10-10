@@ -1151,6 +1151,8 @@ pub fn main_get_server_profile_status() -> String {
                 config::keys::OPTION_RELAY_SERVER,
             ),
             "api_server": get_api_server(),
+            "bootstrap_url": crate::android_provisioning::bootstrap_url(),
+            "bootstrap_url_is_default": crate::android_provisioning::bootstrap_url_is_default(),
             "use_managed_server_profile": config::Config::use_managed_server_profile(),
             "managed_id_server": config::Config::get_hidden_server_option(
                 config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
@@ -1198,6 +1200,38 @@ pub fn main_get_server_profile_status() -> String {
     #[cfg(not(target_os = "android"))]
     {
         "{}".to_owned()
+    }
+}
+
+pub async fn main_test_provisioning_config_url(url: String) -> String {
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_provisioning::test_bootstrap_url(&url)
+            .await
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = url;
+        "Unsupported platform".to_owned()
+    }
+}
+
+pub async fn main_save_provisioning_config_url(url: String, restore_default: bool) -> String {
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_provisioning::save_bootstrap_url(&url, restore_default)
+            .await
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (url, restore_default);
+        "Unsupported platform".to_owned()
     }
 }
 

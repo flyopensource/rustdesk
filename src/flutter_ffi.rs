@@ -1203,11 +1203,10 @@ pub fn main_get_server_profile_status() -> String {
     }
 }
 
-pub async fn main_test_provisioning_config_url(url: String) -> String {
+pub fn main_test_provisioning_config_url(url: String) -> String {
     #[cfg(target_os = "android")]
     {
-        return crate::android_provisioning::test_bootstrap_url(&url)
-            .await
+        return crate::android_provisioning::test_bootstrap_url_from_ui(url)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
@@ -1219,11 +1218,10 @@ pub async fn main_test_provisioning_config_url(url: String) -> String {
     }
 }
 
-pub async fn main_save_provisioning_config_url(url: String, restore_default: bool) -> String {
+pub fn main_save_provisioning_config_url(url: String, restore_default: bool) -> String {
     #[cfg(target_os = "android")]
     {
-        return crate::android_provisioning::save_bootstrap_url(&url, restore_default)
-            .await
+        return crate::android_provisioning::save_bootstrap_url_from_ui(url, restore_default)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();

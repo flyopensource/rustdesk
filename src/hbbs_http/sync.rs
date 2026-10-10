@@ -91,6 +91,8 @@ impl InfoUploaded {
 #[cfg(not(any(target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 async fn start_hbbs_sync_async() {
+    #[cfg(target_os = "android")]
+    crate::android_provisioning::register_runtime_handle(tokio::runtime::Handle::current());
     let mut interval = crate::rustdesk_interval(tokio::time::interval_at(
         Instant::now() + TIME_CONN,
         TIME_CONN,

@@ -7,7 +7,7 @@ use hbb_common::{
     ResultType,
 };
 use serde::Deserialize;
-use std::{collections::HashMap, convert::TryInto, time::Duration};
+use std::{collections::HashMap, convert::TryInto, future::Future, sync::mpsc, time::Duration};
 
 const ENVELOPE_VERSION: u32 = 1;
 const CACHE_OPTION: &str = "android-provisioning-bootstrap-envelope";
@@ -20,9 +20,12 @@ pub const POLICY_REVISION_OPTION: &str = "android-provisioning-policy-revision";
 const MAX_ENVELOPE_SIZE: usize = 64 * 1024;
 const MAX_PLAINTEXT_SIZE: usize = 16 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const CONFIG_URL_TASK_TIMEOUT: Duration = Duration::from_secs(30);
 
 lazy_static::lazy_static! {
     static ref LAST_REFRESH: std::sync::Mutex<Option<std::time::Instant>> = Default::default();
+    static ref PROVISIONING_RUNTIME: std::sync::Mutex<Option<hbb_common::tokio::runtime::Handle>> =
+        Default::default();
 }
 
 #[derive(Deserialize)]
@@ -569,6 +572,49 @@ pub async fn save_bootstrap_url(url: &str, restore_default: bool) -> ResultType<
     );
     *LAST_REFRESH.lock().unwrap() = Some(std::time::Instant::now());
     Ok(())
+}
+
+pub fn register_runtime_handle(handle: hbb_common::tokio::runtime::Handle) {
+    *PROVISIONING_RUNTIME.lock().unwrap() = Some(handle);
+}
+
+fn run_config_url_task<F>(task: F) -> ResultType<()>
+where
+    F: Future<Output = ResultType<()>> + Send + 'static,
+{
+    let handle = PROVISIONING_RUNTIME
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("Provisioning service is not ready"))?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let join_handle = handle.spawn(async move {
+        let result = hbb_common::tokio::time::timeout(CONFIG_URL_TASK_TIMEOUT, task)
+            .await
+            .map_err(|_| anyhow!("Provisioning configuration request timed out"))
+            .and_then(|result| result);
+        if sender.send(result).is_err() {
+            hbb_common::log::warn!("Provisioning configuration result receiver was dropped");
+        }
+    });
+    match receiver.recv_timeout(CONFIG_URL_TASK_TIMEOUT + Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            join_handle.abort();
+            bail!("Provisioning configuration request timed out")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("Provisioning configuration task stopped unexpectedly")
+        }
+    }
+}
+
+pub fn test_bootstrap_url_from_ui(url: String) -> ResultType<()> {
+    run_config_url_task(async move { test_bootstrap_url(&url).await })
+}
+
+pub fn save_bootstrap_url_from_ui(url: String, restore_default: bool) -> ResultType<()> {
+    run_config_url_task(async move { save_bootstrap_url(&url, restore_default).await })
 }
 
 pub async fn provisioning_api_server() -> String {

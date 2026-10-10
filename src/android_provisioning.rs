@@ -407,11 +407,27 @@ pub fn restore_cached_policy(id: &str, uuid: &str) -> ResultType<()> {
 }
 
 pub fn server_profile_source() -> &'static str {
-    if hbb_common::config::Config::is_manual_server_profile() {
+    server_profile_source_for_state(
+        hbb_common::config::Config::is_manual_server_profile(),
+        hbb_common::config::Config::has_hidden_server_profile(),
+        is_configured(),
+        !LocalConfig::get_option(POLICY_REVISION_OPTION).is_empty(),
+    )
+}
+
+fn server_profile_source_for_state(
+    manual: bool,
+    provisioned: bool,
+    configured: bool,
+    policy_received: bool,
+) -> &'static str {
+    if manual {
         "manual"
-    } else if hbb_common::config::Config::has_hidden_server_profile() {
+    } else if provisioned {
         "provisioned"
-    } else if is_configured() {
+    } else if configured && policy_received {
+        "not_configured"
+    } else if configured {
         "waiting"
     } else {
         "public"
@@ -529,7 +545,7 @@ pub async fn provisioning_api_server() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{signature_message, valid_root_command};
+    use super::{server_profile_source_for_state, signature_message, valid_root_command};
 
     #[test]
     fn signature_message_binds_purpose_and_key_id() {
@@ -546,5 +562,29 @@ mod tests {
         for value in ["", "disabled", "su -c", "/system/bin/su\n"] {
             assert!(!valid_root_command(value));
         }
+    }
+
+    #[test]
+    fn server_profile_source_distinguishes_waiting_from_not_configured() {
+        assert_eq!(
+            server_profile_source_for_state(false, false, true, false),
+            "waiting"
+        );
+        assert_eq!(
+            server_profile_source_for_state(false, false, true, true),
+            "not_configured"
+        );
+        assert_eq!(
+            server_profile_source_for_state(false, true, true, true),
+            "provisioned"
+        );
+        assert_eq!(
+            server_profile_source_for_state(true, true, true, true),
+            "manual"
+        );
+        assert_eq!(
+            server_profile_source_for_state(false, false, false, false),
+            "public"
+        );
     }
 }

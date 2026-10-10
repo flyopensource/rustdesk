@@ -45,7 +45,10 @@ class ServerProfileStatus {
     required this.lastError,
   });
 
-  bool get isManaged => source == 'provisioned' || source == 'waiting';
+  bool get isManaged =>
+      source == 'provisioned' ||
+      source == 'waiting' ||
+      source == 'not_configured';
 
   bool get unattendedReady =>
       !unattendedEnabled ||
@@ -112,6 +115,9 @@ AndroidRemoteConfigurationState androidRemoteConfigurationState(
   if (status.source == 'waiting') {
     return AndroidRemoteConfigurationState.waiting;
   }
+  if (status.source == 'not_configured') {
+    return AndroidRemoteConfigurationState.notConfigured;
+  }
   statusNum ??= status.statusNum;
   if (statusNum < 0) {
     return AndroidRemoteConfigurationState.connectionIssue;
@@ -168,6 +174,9 @@ Future<ServerProfileStatus?> getServerProfileStatus() async {
 String serverProfileConnectionLabel(ServerProfileStatus status,
     {int? statusNum}) {
   if (status.source == 'waiting') return translate('Waiting');
+  if (status.source == 'not_configured') {
+    return translate('Not configured');
+  }
   statusNum ??= status.statusNum;
   if (statusNum > 0) return translate('Ready');
   if (statusNum == 0) return translate('Connecting...');
@@ -361,7 +370,9 @@ void showAndroidRemoteConfigurationStatus(
                     translate('Managed by administrator'),
                     status.source == 'waiting'
                         ? translate('Waiting')
-                        : readyLabel(status.source == 'provisioned'),
+                        : status.source == 'not_configured'
+                            ? translate('Not configured')
+                            : readyLabel(status.source == 'provisioned'),
                   ),
                   valueRow(translate('ID/Relay Server'), connectionStatus),
                   valueRow(translate('Password'),

@@ -84,6 +84,15 @@ void main() {
       ),
       AndroidRemoteConfigurationState.remoteControlInProgress,
     );
+    final notConfigured = managedStatus(source: 'not_configured');
+    expect(notConfigured.isManaged, isTrue);
+    expect(
+      androidRemoteConfigurationState(
+        notConfigured,
+        activeSessions: 0,
+      ),
+      AndroidRemoteConfigurationState.notConfigured,
+    );
     expect(
       androidRemoteConfigurationState(
         managedStatus(statusNum: -1),

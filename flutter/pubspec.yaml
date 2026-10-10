@@ -40,6 +40,7 @@ dependencies:
   dash_chat_2:
     git:
       url: https://github.com/rustdesk-org/Dash-Chat-2
+      ref: bd6b5b41254e57c5bcece202ebfb234de63e6487
   draggable_float_widget: ^0.1.0
   settings_ui: ^2.0.2
   flutter_breadcrumb: ^1.0.1
@@ -53,9 +54,11 @@ dependencies:
   window_manager:
     git:
       url: https://github.com/rustdesk-org/window_manager
+      ref: cf4aef0512092fad9344a27ffe1c47ad83269dfc
   desktop_multi_window:
     git:
       url: https://github.com/rustdesk-org/rustdesk_desktop_multi_window
+      ref: cddc2e64f8fefce4f80db87b20bcda2dd019bed6
   freezed_annotation: ^2.0.3
   flutter_custom_cursor:
     git:

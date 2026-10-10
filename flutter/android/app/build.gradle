@@ -111,7 +111,7 @@ android {
         if (managedStorage) main.manifest.srcFile managedManifest
         main.java.srcDirs += 'src/main/kotlin'
 
-        main.proto.srcDirs += '../../../libs/hbb_common/protos'
+        main.proto.srcDirs += '../../../libs/base/protos'
         main.proto.includes += "message.proto"
     }
 

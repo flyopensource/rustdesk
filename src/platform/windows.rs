@@ -5,15 +5,14 @@ use crate::{
     ipc,
     privacy_mode::win_topmost_window::{self, WIN_TOPMOST_INJECTED_PROCESS_EXE},
 };
+use base::message_proto::{DisplayInfo, Resolution, WindowsSession};
 use hbb_common::{
     allow_err,
     anyhow::anyhow,
     bail,
     config::{self, Config},
     libc::{c_int, wchar_t},
-    log,
-    message_proto::{DisplayInfo, Resolution, WindowsSession},
-    sleep,
+    log, sleep,
     sysinfo::{Pid, System},
     timeout, tokio,
 };
@@ -1355,6 +1354,10 @@ pub fn get_install_options() -> String {
 }
 
 pub fn get_silent_install_options(printer_override: Option<bool>) -> &'static str {
+    if !is_win_10_or_greater() {
+        return "desktopicon startmenu";
+    }
+
     let install_printer = match printer_override {
         Some(override_value) => override_value,
         None => {
@@ -1362,9 +1365,13 @@ pub fn get_silent_install_options(printer_override: Option<bool>) -> &'static st
             let subkey = format!(".{}", app_name.to_lowercase());
             let printer = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_PRINTER);
             printer.as_deref() == Some("1")
+                && remote_printer::is_rd_printer_installed(&app_name).unwrap_or_else(|err| {
+                    log::warn!("Failed to check printer installation status: {err}; skipping printer installation");
+                    false
+                })
         }
     };
-    if install_printer && is_win_10_or_greater() {
+    if install_printer {
         "desktopicon startmenu printer"
     } else {
         "desktopicon startmenu"
@@ -1496,8 +1503,8 @@ pub fn rename_exe_cmd(src_exe: &str, path: &str) -> ResultType<String> {
         .ok_or(anyhow!("Can't get file name of {src_exe}"))?
         .to_string_lossy()
         .to_string();
-    let app_name = crate::get_app_name().to_lowercase();
-    if src_exe_filename.to_lowercase() == format!("{app_name}.exe") {
+    let app_name = crate::get_app_name();
+    if src_exe_filename == format!("{app_name}.exe") {
         Ok("".to_owned())
     } else {
         Ok(format!(
@@ -2482,7 +2489,7 @@ pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_syst
 }
 
 pub fn is_elevated(process_id: Option<DWORD>) -> ResultType<bool> {
-    use hbb_common::platform::windows::RAIIHandle;
+    use base::platform::windows::RAIIHandle;
     unsafe {
         let handle: HANDLE = match process_id {
             Some(process_id) => OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id),
@@ -3912,8 +3919,22 @@ pub fn update_to(file: &str) -> ResultType<()> {
 //    We need also to handle the command line parsing to find the tray processes.
 pub fn update_me_msi(msi: &str, quiet: bool) -> ResultType<()> {
     let quiet_args = if quiet { " /qn LAUNCH_TRAY_APP=N" } else { "" };
-    let cmds =
-        format!("chcp 65001 && msiexec /i \"{msi}\"{quiet_args} REBOOT=ReallySuppress /norestart");
+    let app_name = crate::get_app_name();
+    let subkey = format!(".{}", app_name.to_lowercase());
+    let printer_installed = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_PRINTER).as_deref()
+        != Some("0")
+        && remote_printer::is_rd_printer_installed(&app_name).unwrap_or_else(|err| {
+            log::warn!(
+                "Failed to check printer installation status: {err}; skipping printer installation"
+            );
+            false
+        });
+    let printer_args = if printer_installed {
+        ""
+    } else {
+        " INSTALLPRINTER=0"
+    };
+    let cmds = format!("chcp 65001 && msiexec /i \"{msi}\"{quiet_args}{printer_args} REBOOT=ReallySuppress /norestart");
     run_cmds(cmds, false, "update-msi")?;
     Ok(())
 }
@@ -4754,7 +4775,7 @@ mod tests {
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.
     //
-    // This struct is similar to `hbb_common::platform::windows::RAIIHandle`,
+    // This struct is similar to `base::platform::windows::RAIIHandle`,
     // but `RAIIHandle` depends on `WinApi` crate, while this `HandleGuard` only depends on `windows` crate.
     struct HandleGuard(WinHANDLE);
 
@@ -4847,7 +4868,16 @@ mod tests {
     #[test]
     fn install_app_names_enforce_ascii_command_safety() {
         assert!(validate_install_app_name("RustDesk-Admin1").is_ok());
-        for app_name in ["", "RustDesk_Admin", "RustDesk&whoami", "RustDesk应用"] {
+        for app_name in [
+            "",
+            "RustDesk_Admin",
+            "RustDesk&whoami",
+            "RustDesk应用",
+            "RustDesk앱",
+            "RustDeskBüro",
+            "RustDeskFrançais",
+            "RustDeskアプリ",
+        ] {
             assert!(
                 validate_install_app_name(app_name).is_err(),
                 "unsafe application name was accepted: {app_name}"

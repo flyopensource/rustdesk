@@ -5,9 +5,10 @@ use std::{
 };
 
 #[cfg(not(any(target_os = "ios")))]
-use crate::{ui_interface::get_builtin_option, Connection};
+use crate::{common::API_LOG_INTERVAL, ui_interface::get_builtin_option, Connection};
+use base::config::keys;
 use hbb_common::{
-    config::{self, keys, Config, LocalConfig},
+    config::{self, Config, LocalConfig},
     log,
     tokio::{self, sync::broadcast, time::Instant},
 };
@@ -375,6 +376,9 @@ async fn start_hbbs_sync_async() {
                 } else {
                     crate::post_request_with_status(url.clone(), v.to_string(), "").await
                 };
+                if let Err(err) = &heartbeat_response {
+                    hbb_common::throttled_log!(API_LOG_INTERVAL, warn, "Heartbeat failed: {err:?}");
+                }
                 if let Ok((status, s)) = heartbeat_response {
                     #[cfg(target_os = "android")]
                     if requires_device_auth && matches!(status, 401 | 409) {

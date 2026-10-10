@@ -1,6 +1,6 @@
 use super::{gtk_sudo, CursorData, ResultType};
 use desktop::Desktop;
-pub use hbb_common::platform::linux::*;
+pub use base::platform::linux::*;
 
 #[cfg(feature = "drm")]
 pub fn dispatch_wayland_display_probe() {
@@ -17,10 +17,10 @@ use hbb_common::{
     config::Config,
     libc::{c_char, c_int, c_long, c_uint, c_ulong, c_void},
     log,
-    message_proto::{DisplayInfo, Resolution},
     regex::{Captures, Regex},
     users::{get_user_by_name, os::unix::UserExt},
 };
+use base::message_proto::{DisplayInfo, Resolution};
 use libxdo_sys::{self, xdo_t, Window};
 use std::{
     cell::RefCell,
@@ -64,7 +64,7 @@ lazy_static::lazy_static! {
     /// serve but the DRM path can. Unmemoised lookup on purpose: this may run mid-boot, and
     /// a "no" cached that early would be wrong for the rest of the process.
     pub static ref IS_X11: bool = {
-        let x11 = hbb_common::platform::linux::is_x11_or_headless();
+        let x11 = base::platform::linux::is_x11_or_headless();
         #[cfg(feature = "drm")]
         {
             if x11 && !display_server_forced() && is_login_screen_wayland() {
@@ -1302,6 +1302,11 @@ fn _get_display_manager() -> String {
 /// Returns the cached active username when available.
 /// Callers that require a fresh seat0 lookup should call `get_values_of_seat0` directly.
 pub fn get_active_username() -> String {
+    // Flatpak runs only inside the logged-in user's session, and Flathub builds
+    // cannot reach the host's loginctl.
+    if is_flatpak() {
+        return crate::username();
+    }
     if let Some((_, username)) = get_active_user_id_name_from_cache() {
         return username;
     }
@@ -2370,10 +2375,17 @@ mod desktop {
             last
         }
 
+        /// Preserves an active seat0 session's cached identity so the service loop only retries
+        /// late Wayland display discovery instead of repeating the full seat lookup.
         pub fn refresh(&mut self) {
             if !self.sid.is_empty() && is_active_and_seat0(&self.sid) {
                 // Xwayland display and xauth may not be available in a short time after login.
-                if is_xwayland_running(&self.uid) && !self.is_login_wayland() {
+                // Avoid scanning processes on X11, where Xwayland discovery cannot provide any
+                // useful session information.
+                if self.is_wayland()
+                    && !self.is_login_wayland()
+                    && is_xwayland_running(&self.uid)
+                {
                     self.get_display_xauth_xwayland();
                 } else if self.is_wayland() {
                     self.get_display_xauth_wayland();

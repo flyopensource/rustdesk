@@ -115,12 +115,19 @@ const String kOptionEnableAudio = "enable-audio";
 const String kOptionEnableCamera = "enable-camera";
 const String kOptionEnableTerminal = "enable-terminal";
 const String kOptionTerminalPersistent = "terminal-persistent";
+const String kOptionAllowTerminalClipboardWrite =
+    "allow-terminal-clipboard-write";
+const String kTerminalClipboardWriteUnconfigured = "";
+const String kTerminalClipboardWriteAllowed = "Y";
+const String kTerminalClipboardWriteDenied = "N";
 const String kOptionEnableTunnel = "enable-tunnel";
 const String kOptionEnableRemoteRestart = "enable-remote-restart";
 const String kOptionEnableBlockInput = "enable-block-input";
 const String kOptionEnablePrivacyMode = "enable-privacy-mode";
 const String kOptionEnablePermChangeInAcceptWindow =
     "enable-perm-change-in-accept-window";
+const String kOptionHideElevateButtonInAcceptWindow =
+    "hide-elevate-button-in-accept-window";
 const String kOptionAllowRemoteConfigModification =
     "allow-remote-config-modification";
 const String kOptionVerificationMethod = "verification-method";
@@ -159,6 +166,7 @@ const String kOptionPeerTabVisible = "peer-tab-visible";
 const String kOptionPeerCardUiType = "peer-card-ui-type";
 const String kOptionCurrentAbName = "current-ab-name";
 const String kOptionEnableConfirmClosingTabs = "enable-confirm-closing-tabs";
+const String kOptionEnablePortForwardMux = "enable-port-forward-mux";
 const String kOptionAllowAlwaysSoftwareRender = "allow-always-software-render";
 const String kOptionEnableCheckUpdate = "enable-check-update";
 const String kOptionAllowAutoUpdate = "allow-auto-update";
@@ -166,10 +174,13 @@ const String kOptionAllowRemoveWallpaper = "allow-remove-wallpaper";
 const String kOptionStopService = "stop-service";
 const String kOptionDirectxCapture = "enable-directx-capture";
 const String kOptionAllowRemoteCmModification = "allow-remote-cm-modification";
+const String kOptionEnableTcpPunch = "enable-tcp-punch";
 const String kOptionEnableUdpPunch = "enable-udp-punch";
 const String kOptionEnableIpv6Punch = "enable-ipv6-punch";
 const String kOptionAllowSyncClipboardBetweenSessions =
     "allow-sync-clipboard-between-sessions";
+const String kOptionEnableWebrtc = "enable-webrtc";
+const String kOptionRelayFallbackDelay = "relay-fallback-delay";
 const String kOptionEnableTrustedDevices = "enable-trusted-devices";
 const String kOptionShowVirtualMouse = "show-virtual-mouse";
 const String kOptionVirtualMouseScale = "virtual-mouse-scale";

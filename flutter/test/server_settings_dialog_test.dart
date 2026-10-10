@@ -36,6 +36,30 @@ ServerProfileStatus managedStatus({
 }
 
 void main() {
+  test('Android server profile status includes managed and manual routes', () {
+    final status = ServerProfileStatus.fromJson('''
+      {
+        "configured": true,
+        "source": "manual",
+        "use_managed_server_profile": false,
+        "managed_id_server": "managed.example:21116",
+        "managed_relay_server": "managed.example:21117",
+        "managed_key": "managed-key",
+        "manual_id_server": "manual.example:21116",
+        "manual_relay_server": "manual.example:21117",
+        "manual_key": "manual-key"
+      }
+    ''');
+
+    expect(status.useManagedServerProfile, isFalse);
+    expect(status.managedIdServer, 'managed.example:21116');
+    expect(status.managedRelayServer, 'managed.example:21117');
+    expect(status.managedKey, 'managed-key');
+    expect(status.manualIdServer, 'manual.example:21116');
+    expect(status.manualRelayServer, 'manual.example:21117');
+    expect(status.manualKey, 'manual-key');
+  });
+
   testWidgets('server settings text fields preserve literal input',
       (tester) async {
     final controller = TextEditingController(text: 'AbCdR1c1E=');

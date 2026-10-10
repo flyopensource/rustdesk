@@ -775,5 +775,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Accessibility service", "无障碍服务"),
         ("All files access", "所有文件访问权限"),
         ("Active sessions", "活动会话"),
+        ("Use managed server configuration", "使用后台服务器配置"),
     ].iter().cloned().collect();
 }

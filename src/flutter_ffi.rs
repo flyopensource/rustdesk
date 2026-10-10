@@ -1013,6 +1013,7 @@ pub fn main_set_option(key: String, value: String) {
         || key.eq(config::keys::OPTION_ALLOW_WEBSOCKET)
         || key.eq(config::keys::OPTION_DISABLE_UDP)
         || key.eq("api-server")
+        || key.eq(config::keys::OPTION_USE_MANAGED_SERVER_PROFILE)
     {
         if is_allow_tls_fallback {
             hbb_common::tls::reset_tls_cache();
@@ -1150,6 +1151,23 @@ pub fn main_get_server_profile_status() -> String {
                 config::keys::OPTION_RELAY_SERVER,
             ),
             "api_server": get_api_server(),
+            "use_managed_server_profile": config::Config::use_managed_server_profile(),
+            "managed_id_server": config::Config::get_hidden_server_option(
+                config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
+            ),
+            "managed_relay_server": config::Config::get_hidden_server_option(
+                config::keys::OPTION_RELAY_SERVER,
+            ),
+            "managed_key": config::Config::get_hidden_server_option(
+                config::keys::OPTION_KEY,
+            ),
+            "manual_id_server": config::Config::get_option(
+                config::keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
+            ),
+            "manual_relay_server": config::Config::get_option(
+                config::keys::OPTION_RELAY_SERVER,
+            ),
+            "manual_key": config::Config::get_option(config::keys::OPTION_KEY),
             "revision": LocalConfig::get_option(
                 crate::android_provisioning::POLICY_REVISION_OPTION,
             ),

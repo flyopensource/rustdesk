@@ -15,6 +15,13 @@ class ServerProfileStatus {
   final String idServer;
   final String relayServer;
   final String apiServer;
+  final bool useManagedServerProfile;
+  final String managedIdServer;
+  final String managedRelayServer;
+  final String managedKey;
+  final String manualIdServer;
+  final String manualRelayServer;
+  final String manualKey;
   final String revision;
   final bool permanentPasswordSet;
   final bool unattendedEnabled;
@@ -33,6 +40,13 @@ class ServerProfileStatus {
     required this.idServer,
     required this.relayServer,
     required this.apiServer,
+    this.useManagedServerProfile = false,
+    this.managedIdServer = '',
+    this.managedRelayServer = '',
+    this.managedKey = '',
+    this.manualIdServer = '',
+    this.manualRelayServer = '',
+    this.manualKey = '',
     required this.revision,
     required this.permanentPasswordSet,
     required this.unattendedEnabled,
@@ -68,6 +82,14 @@ class ServerProfileStatus {
       idServer: json['id_server'] as String? ?? '',
       relayServer: json['relay_server'] as String? ?? '',
       apiServer: json['api_server'] as String? ?? '',
+      useManagedServerProfile:
+          json['use_managed_server_profile'] as bool? ?? false,
+      managedIdServer: json['managed_id_server'] as String? ?? '',
+      managedRelayServer: json['managed_relay_server'] as String? ?? '',
+      managedKey: json['managed_key'] as String? ?? '',
+      manualIdServer: json['manual_id_server'] as String? ?? '',
+      manualRelayServer: json['manual_relay_server'] as String? ?? '',
+      manualKey: json['manual_key'] as String? ?? '',
       revision: json['revision'] as String? ?? '',
       permanentPasswordSet: json['permanent_password_set'] as bool? ?? false,
       unattendedEnabled: json['unattended_enabled'] as bool? ?? false,
@@ -230,8 +252,17 @@ void setTemporaryPasswordLengthDialog(
 
 void showServerSettings(
     OverlayDialogManager dialogManager, void Function(VoidCallback) setState,
-    {ServerProfileStatus? serverProfileStatus}) async {
+    {ServerProfileStatus? serverProfileStatus,
+    void Function(ServerProfileStatus)? onServerProfileChanged}) async {
   serverProfileStatus ??= await getServerProfileStatus();
+  if (isAndroid && serverProfileStatus?.configured == true) {
+    _showAndroidProvisionedServerSettings(
+      dialogManager,
+      serverProfileStatus!,
+      onServerProfileChanged,
+    );
+    return;
+  }
   if (serverProfileStatus?.isManaged == true) {
     _showManagedServerSettings(dialogManager, serverProfileStatus!);
     return;
@@ -258,6 +289,143 @@ void showServerSettings(
   showServerSettingsWithValue(
       ServerConfig.fromOptions(options), dialogManager, setState,
       managedApiServer: managedApiServer);
+}
+
+void _showAndroidProvisionedServerSettings(
+  OverlayDialogManager dialogManager,
+  ServerProfileStatus initialStatus,
+  void Function(ServerProfileStatus)? onServerProfileChanged,
+) {
+  var status = initialStatus;
+  var useManaged = status.useManagedServerProfile;
+  var isInProgress = false;
+  var idError = '';
+  var relayError = '';
+  final idCtrl = TextEditingController();
+  final relayCtrl = TextEditingController();
+  final keyCtrl = TextEditingController();
+
+  void updateControllers() {
+    idCtrl.text = useManaged ? status.managedIdServer : status.manualIdServer;
+    relayCtrl.text =
+        useManaged ? status.managedRelayServer : status.manualRelayServer;
+    keyCtrl.text = useManaged ? status.managedKey : status.manualKey;
+  }
+
+  updateControllers();
+  dialogManager.show((setState, close, context) {
+    Future<void> refreshStatus() async {
+      final refreshed = await getServerProfileStatus();
+      if (refreshed != null) {
+        status = refreshed;
+        useManaged = refreshed.useManagedServerProfile;
+        updateControllers();
+        onServerProfileChanged?.call(refreshed);
+      }
+    }
+
+    Future<void> toggleManaged(bool value) async {
+      setState(() => isInProgress = true);
+      await bind.mainSetOption(
+        key: 'android-use-managed-server-profile',
+        value: value ? 'Y' : 'N',
+      );
+      await refreshStatus();
+      setState(() {
+        isInProgress = false;
+        idError = '';
+        relayError = '';
+      });
+    }
+
+    Future<bool> saveManualProfile() async {
+      final idServer = idCtrl.text.trim().replaceFirst(RegExp(r'/$'), '');
+      final relayServer = relayCtrl.text.trim().replaceFirst(RegExp(r'/$'), '');
+      setState(() {
+        isInProgress = true;
+        idError = '';
+        relayError = '';
+      });
+      if (idServer.isNotEmpty) {
+        idError = translate(await bind.mainTestIfValidServer(
+          server: idServer,
+          testWithProxy: true,
+        ));
+      }
+      if (idError.isEmpty && relayServer.isNotEmpty) {
+        relayError = translate(await bind.mainTestIfValidServer(
+          server: relayServer,
+          testWithProxy: true,
+        ));
+      }
+      if (idError.isEmpty && relayError.isEmpty) {
+        await bind.mainSetOption(
+            key: 'custom-rendezvous-server', value: idServer);
+        await bind.mainSetOption(key: 'relay-server', value: relayServer);
+        await bind.mainSetOption(key: 'key', value: keyCtrl.text.trim());
+        await refreshStatus();
+      }
+      setState(() => isInProgress = false);
+      return idError.isEmpty && relayError.isEmpty;
+    }
+
+    Widget field(
+      String label,
+      TextEditingController controller,
+      String error,
+    ) {
+      return serverSettingsTextFormField(
+        label: label,
+        controller: controller,
+        errorMsg: error,
+        enabled: !useManaged && !isInProgress,
+      );
+    }
+
+    return CustomAlertDialog(
+      title: Text(translate('ID/Relay Server')),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 280, maxWidth: 500),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Use managed server configuration')),
+                value: useManaged,
+                onChanged: isInProgress ? null : toggleManaged,
+              ),
+              field(translate('ID Server'), idCtrl, idError),
+              const SizedBox(height: 8),
+              field(translate('Relay Server'), relayCtrl, relayError),
+              const SizedBox(height: 8),
+              field('Key', keyCtrl, ''),
+              if (isInProgress)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: LinearProgressIndicator(),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        dialogButton('Close', onPressed: close, isOutline: true),
+        if (!useManaged)
+          dialogButton(
+            'Save',
+            onPressed: isInProgress
+                ? null
+                : () async {
+                    if (await saveManualProfile()) {
+                      showToast(translate('Successful'));
+                    }
+                  },
+          ),
+      ],
+    );
+  });
 }
 
 void _showManagedServerSettings(

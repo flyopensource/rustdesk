@@ -802,11 +802,19 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       _serverProfileStatus = serverProfileStatus;
                     });
                   }
-                  showServerSettings(gFFI.dialogManager, (callback) async {
-                    _isUsingPublicServer = await bind.mainIsUsingPublicServer();
-                    if (!mounted) return;
-                    setState(callback);
-                  }, serverProfileStatus: serverProfileStatus);
+                  showServerSettings(
+                      gFFI.dialogManager,
+                      (callback) async {
+                        _isUsingPublicServer =
+                            await bind.mainIsUsingPublicServer();
+                        if (!mounted) return;
+                        setState(callback);
+                      },
+                      serverProfileStatus: serverProfileStatus,
+                      onServerProfileChanged: (status) {
+                        if (!mounted) return;
+                        setState(() => _serverProfileStatus = status);
+                      });
                 }),
           if (!_hideNetwork && !_hideProxy)
             SettingsTile(
